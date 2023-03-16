@@ -2,12 +2,12 @@
 
   <PropertyGroup>
     <TargetFrameworks>net45;net461;net471;netstandard2.0;netstandard2.1;netcoreapp3.1;net5.0;net6.0</TargetFrameworks>
-    <Description>A truly async SingleStore ADO.NET provider.</Description>
+    <Description>A truly async SingleStore ADO.NET provider, forked by Pigment</Description>
     <Copyright>Copyright 2016–2021 Bradley Grainger</Copyright>
     <Copyright>Copyright 2022 SingleStore Inc.</Copyright>
     <Authors>SingleStore Inc.</Authors>
-    <AssemblyName>SingleStoreConnector</AssemblyName>
-    <PackageId>SingleStoreConnector</PackageId>
+    <AssemblyName>SingleStoreConnector.Pigment</AssemblyName>
+    <PackageId>SingleStoreConnector.Pigment</PackageId>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>singlestore;singlestoreconnector;async;ado.net;database;netcore</PackageTags>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -15,6 +15,7 @@
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>SingleStoreConnector</RootNamespace>
+    <PackageVersion>1.0.1</PackageVersion>
   </PropertyGroup>
 
   <ItemGroup Condition=" '$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'net461' OR '$(TargetFramework)' == 'net471' ">

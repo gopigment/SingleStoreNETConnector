@@ -4,12 +4,12 @@
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>..\..\SingleStoreConnector.snk</AssemblyOriginatorKeyFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <PackageReleaseNotes>https://github.com/memsql/SingleStoreNETConnector/blob/master/docs/VersionHistory.md</PackageReleaseNotes>
-    <PackageProjectUrl>https://github.com/memsql/SingleStoreNETConnector</PackageProjectUrl>
+    <PackageReleaseNotes>https://github.com/gopigment/SingleStoreNETConnector/blob/master/docs/VersionHistory.md</PackageReleaseNotes>
+    <PackageProjectUrl>https://github.com/gopigment/SingleStoreNETConnector</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageIcon>singlestore_logo.png</PackageIcon>
     <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://github.com/memsql/SingleStoreNETConnector.git</RepositoryUrl>
+    <RepositoryUrl>https://github.com/gopigment/SingleStoreNETConnector.git</RepositoryUrl>
     <DebugType>embedded</DebugType>
     <LangVersion>preview</LangVersion>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
