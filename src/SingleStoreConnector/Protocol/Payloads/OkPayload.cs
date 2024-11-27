@@ -79,7 +79,7 @@ internal sealed class OkPayload
 			// try to detect if it was actually a length-prefixed string (up to 250 bytes); some servers send
 			// a length-prefixed status string even when CLIENT_SESSION_TRACK is not specified
 			if (statusBytes.Length != 0 && statusBytes[0] == statusBytes.Length - 1)
-				statusBytes = statusBytes.Slice(1);
+				statusBytes = statusBytes[1..];
 		}
 
 		var statusInfo = statusBytes.Length == 0 ? null : Encoding.UTF8.GetString(statusBytes);
@@ -105,6 +105,6 @@ internal sealed class OkPayload
 		NewSchema = newSchema;
 	}
 
-	static readonly OkPayload s_autoCommitOk = new(0, 0, ServerStatus.AutoCommit, 0, null, null);
-	static readonly OkPayload s_autoCommitSessionStateChangedOk = new(0, 0, ServerStatus.AutoCommit | ServerStatus.SessionStateChanged, 0, null, null);
+	private static readonly OkPayload s_autoCommitOk = new(0, 0, ServerStatus.AutoCommit, 0, null, null);
+	private static readonly OkPayload s_autoCommitSessionStateChangedOk = new(0, 0, ServerStatus.AutoCommit | ServerStatus.SessionStateChanged, 0, null, null);
 }

@@ -66,7 +66,7 @@ public class SslTests : IClassFixture<DatabaseFixture>
 		connection.ProvideClientCertificatesCallback = x =>
 		{
 			x.Add(new X509Certificate2(certificateFilePath, certificateFilePassword));
-			return SingleStoreConnector.Utilities.Utility.CompletedTask;
+			return Task.CompletedTask;
 		};
 #else
 		connection.ProvideClientCertificatesCallback = async x =>
@@ -81,7 +81,7 @@ public class SslTests : IClassFixture<DatabaseFixture>
 	}
 #endif
 
-			[SkippableTheory(ConfigSettings.RequiresSsl | ConfigSettings.KnownClientCertificate)]
+	[SkippableTheory(ConfigSettings.RequiresSsl | ConfigSettings.KnownClientCertificate)]
 	[InlineData("ssl-client-cert.pem", "ssl-client-key.pem", null)]
 	[InlineData("ssl-client-cert.pem", "ssl-client-key-null.pem", null)]
 #if !BASELINE
@@ -218,13 +218,15 @@ public class SslTests : IClassFixture<DatabaseFixture>
 	{
 		using var connection = new SingleStoreConnection(AppConfig.ConnectionString);
 		await connection.OpenAsync();
+#pragma warning disable SYSLIB0039 // SslProtocols.Tls11 is obsolete
 		var expectedProtocol = AppConfig.SupportedFeatures.HasFlag(ServerFeatures.Tls12) ? SslProtocols.Tls12 :
 			AppConfig.SupportedFeatures.HasFlag(ServerFeatures.Tls11) ? SslProtocols.Tls11 :
 			SslProtocols.Tls;
 		var expectedProtocolString = expectedProtocol == SslProtocols.Tls12 ? "TLSv1.2" :
 			expectedProtocol == SslProtocols.Tls11 ? "TLSv1.1" : "TLSv1";
+#pragma warning restore SYSLIB0039 // SslProtocols.Tls11 is obsolete
 
-#if !NET452 && !NET461 && !NET472
+#if !NET462 && !NET472
 		// https://docs.microsoft.com/en-us/dotnet/core/whats-new/dotnet-core-3-0#tls-13--openssl-111-on-linux
 		if (expectedProtocol == SslProtocols.Tls12 && AppConfig.SupportedFeatures.HasFlag(ServerFeatures.Tls13) && RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
 		{
@@ -242,7 +244,7 @@ public class SslTests : IClassFixture<DatabaseFixture>
 		Assert.Equal(expectedProtocolString, reader.GetString(1));
 	}
 
-#if !NET5_0
+#if !NET5_0_OR_GREATER
 	[SkippableFact(ConfigSettings.RequiresSsl)]
 	public async Task ForceTls11()
 	{

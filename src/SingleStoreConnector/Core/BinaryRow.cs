@@ -49,7 +49,7 @@ internal sealed class BinaryRow : Row
 					ColumnType.Short or ColumnType.Year => 2,
 					ColumnType.Tiny => 1,
 					ColumnType.Date or ColumnType.DateTime or ColumnType.NewDate or ColumnType.Timestamp or ColumnType.Time => reader.ReadByte(),
-					ColumnType.DateTime2 or ColumnType.Timestamp2 => throw new NotSupportedException("ColumnType {0} is not supported".FormatInvariant(columnDefinition.ColumnType)),
+					ColumnType.DateTime2 or ColumnType.Timestamp2 => throw new NotSupportedException($"ColumnType {columnDefinition.ColumnType} is not supported"),
 					_ => checked((int) reader.ReadLengthEncodedInteger()),
 				};
 
@@ -100,9 +100,9 @@ internal sealed class BinaryRow : Row
 			                ProtocolUtility.GetBytesPerCharacter(columnDefinition.CharacterSet);
 
 			if (Connection.GuidFormat == SingleStoreGuidFormat.Char36 && columnLen == 36)
-				return Utf8Parser.TryParse(data, out Guid guid, out int guid36BytesConsumed, 'D') && guid36BytesConsumed == 36 ? guid : throw new FormatException();
+				return Utf8Parser.TryParse(data, out Guid guid, out int guid36BytesConsumed, 'D') && guid36BytesConsumed == 36 ? guid : throw new FormatException($"Could not parse CHAR(36) value as Guid: {Encoding.UTF8.GetString(data)}");
 			if (Connection.GuidFormat == SingleStoreGuidFormat.Char32 && columnLen == 32)
-				return Utf8Parser.TryParse(data, out Guid guid, out int guid32BytesConsumed, 'N') && guid32BytesConsumed == 32 ? guid : throw new FormatException();
+				return Utf8Parser.TryParse(data, out Guid guid, out int guid32BytesConsumed, 'N') && guid32BytesConsumed == 32 ? guid : throw new FormatException($"Could not parse CHAR(32) value as Guid: {Encoding.UTF8.GetString(data)}");
 			if (Connection.TreatChar48AsGeographyPoint && columnLen == 48)
 				goto case ColumnType.GeographyPoint;
 			if (columnLen == 1431655765)
@@ -160,7 +160,7 @@ internal sealed class BinaryRow : Row
 			return Encoding.UTF8.GetString(data);
 
 		default:
-			throw new NotImplementedException("Reading {0} not implemented".FormatInvariant(columnDefinition.ColumnType));
+			throw new NotImplementedException($"Reading {columnDefinition.ColumnType} not implemented");
 		}
 	}
 
@@ -193,16 +193,20 @@ internal sealed class BinaryRow : Row
 			second = value[6];
 		}
 
-		var microseconds = value.Length <= 7 ? 0 : MemoryMarshal.Read<int>(value.Slice(7));
+		var microseconds = value.Length <= 7 ? 0 : MemoryMarshal.Read<int>(value[7..]);
 
 		try
 		{
 			return Connection.AllowZeroDateTime ? (object) new SingleStoreDateTime(year, month, day, hour, minute, second, microseconds) :
+#if NET7_0_OR_GREATER
+				new DateTime(year, month, day, hour, minute, second, microseconds / 1000, microseconds % 1000, Connection.DateTimeKind);
+#else
 				new DateTime(year, month, day, hour, minute, second, microseconds / 1000, Connection.DateTimeKind).AddTicks(microseconds % 1000 * 10);
+#endif
 		}
 		catch (Exception ex)
 		{
-			throw new FormatException("Couldn't interpret value as a valid DateTime".FormatInvariant(Encoding.UTF8.GetString(value)), ex);
+			throw new FormatException($"Couldn't interpret value as a valid DateTime: {Encoding.UTF8.GetString(value)}", ex);
 		}
 	}
 
@@ -212,11 +216,11 @@ internal sealed class BinaryRow : Row
 			return TimeSpan.Zero;
 
 		var isNegative = value[0];
-		var days = MemoryMarshal.Read<int>(value.Slice(1));
+		var days = MemoryMarshal.Read<int>(value[1..]);
 		var hours = (int) value[5];
 		var minutes = (int) value[6];
 		var seconds = (int) value[7];
-		var microseconds = value.Length == 8 ? 0 : MemoryMarshal.Read<int>(value.Slice(8));
+		var microseconds = value.Length == 8 ? 0 : MemoryMarshal.Read<int>(value[8..]);
 
 		if (isNegative != 0)
 		{
@@ -227,6 +231,10 @@ internal sealed class BinaryRow : Row
 			microseconds = -microseconds;
 		}
 
+#if NET7_0_OR_GREATER
+		return new TimeSpan(days, hours, minutes, seconds, microseconds / 1000, microseconds % 1000);
+#else
 		return new TimeSpan(days, hours, minutes, seconds) + TimeSpan.FromTicks(microseconds * 10);
+#endif
 	}
 }

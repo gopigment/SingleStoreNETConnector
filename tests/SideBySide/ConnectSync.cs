@@ -553,17 +553,13 @@ create table `{AppConfig.SecondaryDatabase}`.changedb2(value int not null);");
 	public void Sha256WithoutSecureConnection()
 	{
 		var csb = AppConfig.CreateSha256ConnectionStringBuilder();
-		csb.SslMode = SingleStoreSslMode.None;
+		csb.SslMode = SingleStoreSslMode.Disabled;
 		csb.AllowPublicKeyRetrieval = true;
 		using var connection = new SingleStoreConnection(csb.ConnectionString);
-#if NET45
-		Assert.Throws<NotImplementedException>(() => connection.Open());
-#else
 		if (AppConfig.SupportedFeatures.HasFlag(ServerFeatures.RsaEncryption))
 			connection.Open();
 		else
 			Assert.Throws<SingleStoreException>(() => connection.Open());
-#endif
 	}
 
 	[Fact]
@@ -597,6 +593,17 @@ create table `{AppConfig.SecondaryDatabase}`.changedb2(value int not null);");
 		using var connection = new SingleStoreConnection(csb.ConnectionString);
 		connection.Open();
 		Assert.Equal(ConnectionState.Open, connection.State);
+	}
+
+	[Fact]
+	public void DisposeRaisesDisposed()
+	{
+		var disposedCount = 0;
+		var connection = new SingleStoreConnection(AppConfig.ConnectionString);
+		connection.Disposed += (sender, args) => disposedCount++;
+		connection.Open();
+		connection.Dispose();
+		Assert.Equal(1, disposedCount);
 	}
 
 	readonly DatabaseFixture m_database;

@@ -42,7 +42,7 @@ create table insert_ai(rowid integer not null primary key auto_increment);");
 			using var command = new SingleStoreCommand("INSERT INTO insert_ai(rowid) VALUES (@rowid);", m_database.Connection);
 			command.Parameters.AddWithValue("@rowid", -1);
 			Assert.Equal(1, await command.ExecuteNonQueryAsync());
-			Assert.Equal(-1L, command.LastInsertedId);
+			Assert.Equal(0, command.LastInsertedId);
 		}
 		finally
 		{
@@ -147,6 +147,27 @@ INSERT INTO insert_ai (text) VALUES ('test');
 UNLOCK TABLES;", m_database.Connection);
 			Assert.Equal(1, await command.ExecuteNonQueryAsync());
 			Assert.Equal(1L, command.LastInsertedId);
+		}
+		finally
+		{
+			m_database.Connection.Close();
+		}
+	}
+
+	[Fact]
+	public async Task LastInsertedIdInsertIgnore()
+	{
+		await m_database.Connection.ExecuteAsync(@"drop table if exists insert_ai;
+create table insert_ai(rowid integer not null primary key auto_increment, text varchar(100) not null);
+");
+		try
+		{
+			await m_database.Connection.OpenAsync();
+			using var command = new SingleStoreCommand(@"INSERT IGNORE INTO insert_ai (rowid, text) VALUES (2, 'test');", m_database.Connection);
+			Assert.Equal(1, await command.ExecuteNonQueryAsync());
+			Assert.Equal(2L, command.LastInsertedId);
+			Assert.Equal(0, await command.ExecuteNonQueryAsync());
+			Assert.Equal(0L, command.LastInsertedId);
 		}
 		finally
 		{
@@ -688,17 +709,17 @@ value mediumblob null
 				cmd.Prepare();
 			cmd.ExecuteNonQuery();
 		}
-		Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6 }, connection.Query<byte[]>(@"select value from insert_mysql_blob;").Single());
+		Assert.Equal(new byte[] { 1, 0, 2, 39, 3, 92, 4, 34, 5, 6  }, connection.Query<byte[]>(@"select value from insert_mysql_blob;").Single());
 	}
 
 	public static IEnumerable<object[]> GetBlobs()
 	{
 		foreach (var blob in new object[]
 		{
-			new byte[] { 1, 2, 3, 4, 5, 6 },
-			new ReadOnlyMemory<byte>(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }, 1, 6),
-			new Memory<byte>(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }, 1, 6),
-			new ArraySegment<byte>(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }, 1, 6),
+			new byte[] { 1, 0, 2, 39, 3, 92, 4, 34, 5, 6 },
+			new ReadOnlyMemory<byte>(new byte[] { 0, 1, 0, 2, 39, 3, 92, 4, 34, 5, 6, 7, 8 }, 1, 10),
+			new Memory<byte>(new byte[] { 0, 1, 0, 2, 39, 3, 92, 4, 34, 5, 6, 7, 8 }, 1, 10),
+			new ArraySegment<byte>(new byte[] { 0, 1, 0, 2, 39, 3, 92, 4, 34, 5, 6, 7, 8 }, 1, 10),
 		})
 		{
 			yield return new[] { blob, false };

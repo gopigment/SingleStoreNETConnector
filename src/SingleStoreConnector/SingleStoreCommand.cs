@@ -70,6 +70,7 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	{
 		GC.SuppressFinalize(this);
 		m_commandTimeout = other.m_commandTimeout;
+		((ICancellableCommand) this).EffectiveCommandTimeout = null;
 		m_commandType = other.m_commandType;
 		DesignTimeVisible = other.DesignTimeVisible;
 		UpdatedRowSource = other.UpdatedRowSource;
@@ -96,7 +97,13 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	/// <inheritdoc/>
 	public override void Cancel() => Connection?.Cancel(this, m_commandId, true);
 
-	/// <inheritdoc/>
+	/// <summary>
+	/// Executes this command on the associated <see cref="SingleStoreConnection"/>.
+	/// </summary>
+	/// <returns>The number of rows affected.</returns>
+	/// <remarks>For UPDATE, INSERT, and DELETE statements, the return value is the number of rows affected by the command.
+	/// For stored procedures, the return value is the number of rows affected by the last statement in the stored procedure,
+	/// or zero if the last statement is a SELECT. For all other types of statements, the return value is -1.</remarks>
 	public override int ExecuteNonQuery() => ExecuteNonQueryAsync(IOBehavior.Synchronous, CancellationToken.None).GetAwaiter().GetResult();
 
 	/// <inheritdoc/>
@@ -153,7 +160,7 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	private Task PrepareAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		if (!NeedsPrepare(out var exception))
-			return exception is null ? Utility.CompletedTask : Utility.TaskFromException(exception);
+			return exception is null ? Task.CompletedTask : Task.FromException(exception);
 
 		return Connection!.Session.PrepareAsync(this, ioBehavior, cancellationToken);
 	}
@@ -167,7 +174,7 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 			exception = new InvalidOperationException("Connection must be Open; current state is {0}".FormatInvariant(Connection.State));
 		else if (string.IsNullOrWhiteSpace(CommandText))
 			exception = new InvalidOperationException("CommandText must be specified");
-		else if (Connection?.HasActiveReader ?? false)
+		else if (Connection?.HasActiveReader is true)
 			exception = new InvalidOperationException("Cannot call Prepare when there is an open DataReader for this command's connection; it must be closed first.");
 
 		if (exception is not null || Connection!.IgnorePrepare)
@@ -220,8 +227,12 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	public override int CommandTimeout
 	{
 		get => Math.Min(m_commandTimeout ?? Connection?.DefaultCommandTimeout ?? 0, int.MaxValue / 1000);
-		set => m_commandTimeout = value >= 0 ? value : throw new ArgumentOutOfRangeException(nameof(value), "CommandTimeout must be greater than or equal to zero.");
-	}
+		set
+		{
+			m_commandTimeout = value >= 0 ? value : throw new ArgumentOutOfRangeException(nameof(value), "CommandTimeout must be greater than or equal to zero.");
+			((ICancellableCommand) this).EffectiveCommandTimeout = null;
+		}
+}
 
 	/// <inheritdoc/>
 	public override CommandType CommandType
@@ -270,6 +281,14 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
 		ExecuteReaderAsync(behavior, IOBehavior.Synchronous, CancellationToken.None).GetAwaiter().GetResult();
 
+	/// <summary>
+	/// Executes this command asynchronously on the associated <see cref="SingleStoreConnection"/>.
+	/// </summary>
+	/// <param name="cancellationToken">A token to cancel the asynchronous operation.</param>
+	/// <returns>A task representing the asynchronous operation.</returns>
+	/// <remarks>For UPDATE, INSERT, and DELETE statements, the return value is the number of rows affected by the command.
+	/// For stored procedures, the return value is the number of rows affected by the last statement in the stored procedure,
+	/// or zero if the last statement is a SELECT. For all other types of statements, the return value is -1.</remarks>
 	public override Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken) =>
 		ExecuteNonQueryAsync(AsyncIOBehavior, cancellationToken);
 
@@ -332,7 +351,7 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	internal Task<SingleStoreDataReader> ExecuteReaderNoResetTimeoutAsync(CommandBehavior behavior, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		if (!IsValid(out var exception))
-			return Utility.TaskFromException<SingleStoreDataReader>(exception);
+			return Task.FromException<SingleStoreDataReader>(exception);
 
 		var activity = NoActivity ? null : Connection!.Session.StartActivity(ActivitySourceHelper.ExecuteActivityName,
 			ActivitySourceHelper.DatabaseStatementTagName, CommandText);
@@ -360,7 +379,7 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
 		return default;
 #else
-		return Utility.CompletedTask;
+		return Task.CompletedTask;
 #endif
 	}
 
@@ -371,10 +390,10 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	/// <returns>An object that must be disposed to revoke the cancellation registration.</returns>
 	/// <remarks>This method is more efficient than calling <code>token.Register(Command.Cancel)</code> because it avoids
 	/// unnecessary allocations.</remarks>
-	IDisposable? ICancellableCommand.RegisterCancel(CancellationToken cancellationToken)
+	CancellationTokenRegistration ICancellableCommand.RegisterCancel(CancellationToken cancellationToken)
 	{
 		if (!cancellationToken.CanBeCanceled)
-			return null;
+			return default;
 
 		m_cancelAction ??= Cancel;
 		return cancellationToken.Register(m_cancelAction);
@@ -395,6 +414,8 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	bool ICancellableCommand.IsTimedOut => Volatile.Read(ref m_commandTimedOut);
 
 	int ICancellableCommand.CommandId => m_commandId;
+
+	int? ICancellableCommand.EffectiveCommandTimeout { get; set; }
 
 	int ICancellableCommand.CancelAttemptCount { get; set; }
 
@@ -431,19 +452,17 @@ public sealed class SingleStoreCommand : DbCommand, ISingleStoreCommand, ICancel
 	SingleStoreParameterCollection? ISingleStoreCommand.OutParameters { get; set; }
 	SingleStoreParameter? ISingleStoreCommand.ReturnParameter { get; set; }
 
-	static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleStoreCommand));
-
-	readonly int m_commandId;
-	bool m_isDisposed;
-	SingleStoreConnection? m_connection;
-	string m_commandText;
-	SingleStoreParameterCollection? m_parameterCollection;
-	SingleStoreAttributeCollection? m_attributeCollection;
-	int? m_commandTimeout;
-	CommandType m_commandType;
-	CommandBehavior m_commandBehavior;
-	Action? m_cancelAction;
-	Action? m_cancelForCommandTimeoutAction;
-	uint m_cancelTimerId;
-	bool m_commandTimedOut;
+	private readonly int m_commandId;
+	private bool m_isDisposed;
+	private SingleStoreConnection? m_connection;
+	private string m_commandText;
+	private SingleStoreParameterCollection? m_parameterCollection;
+	private SingleStoreAttributeCollection? m_attributeCollection;
+	private int? m_commandTimeout;
+	private CommandType m_commandType;
+	private CommandBehavior m_commandBehavior;
+	private Action? m_cancelAction;
+	private Action? m_cancelForCommandTimeoutAction;
+	private uint m_cancelTimerId;
+	private bool m_commandTimedOut;
 }

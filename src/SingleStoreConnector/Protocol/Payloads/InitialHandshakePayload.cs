@@ -32,11 +32,11 @@ internal sealed class InitialHandshakePayload
 			var authPluginDataLength = reader.ReadByte();
 			reader.Offset += 6;
 
-			long extendedCapabilites = reader.ReadInt32();
+			long extendedCapabilities = reader.ReadInt32();
 			if ((protocolCapabilities & ProtocolCapabilities.LongPassword) == 0)
 			{
 				// MariaDB clears the CLIENT_LONG_PASSWORD flag to indicate it's not a MySQL Server
-				protocolCapabilities |= (ProtocolCapabilities) (extendedCapabilites << 32);
+				protocolCapabilities |= (ProtocolCapabilities) (extendedCapabilities << 32);
 			}
 
 			if ((protocolCapabilities & ProtocolCapabilities.SecureConnection) != 0)
@@ -44,7 +44,7 @@ internal sealed class InitialHandshakePayload
 				var authPluginData2 = reader.ReadByteString(Math.Max(13, authPluginDataLength - 8));
 				authPluginData = new byte[authPluginData1.Length + authPluginData2.Length];
 				authPluginData1.CopyTo(authPluginData);
-				authPluginData2.CopyTo(new Span<byte>(authPluginData).Slice(authPluginData1.Length));
+				authPluginData2.CopyTo(new Span<byte>(authPluginData)[authPluginData1.Length..]);
 			}
 			if ((protocolCapabilities & ProtocolCapabilities.PluginAuth) != 0)
 				authPluginName = Encoding.UTF8.GetString(reader.ReadNullOrEofTerminatedByteString());
@@ -66,5 +66,5 @@ internal sealed class InitialHandshakePayload
 		AuthPluginName = authPluginName;
 	}
 
-	const byte c_protocolVersion = 0x0A;
+	private const byte c_protocolVersion = 0x0A;
 }

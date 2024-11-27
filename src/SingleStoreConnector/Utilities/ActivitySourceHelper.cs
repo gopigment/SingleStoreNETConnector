@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using SingleStoreConnector.Core;
 
 namespace SingleStoreConnector.Utilities;
 
@@ -35,18 +36,33 @@ internal static class ActivitySourceHelper
 		return activity;
 	}
 
-	public static void SetSuccess(this Activity activity) => activity.SetTag(StatusCodeTagName, "OK");
+	public static void SetSuccess(this Activity activity)
+	{
+		activity.SetStatus(ActivityStatusCode.Ok);
+		activity.SetTag(StatusCodeTagName, "OK");
+	}
 
 	public static void SetException(this Activity activity, Exception exception)
 	{
+		var description = exception is SingleStoreException mySqlException ? mySqlException.ErrorCode.ToString() : exception.Message;
+		activity.SetStatus(ActivityStatusCode.Error, description);
 		activity.SetTag(StatusCodeTagName, "ERROR");
-		activity.SetTag("otel.status_description", exception is SingleStoreException mySqlException ? mySqlException.ErrorCode.ToString() : exception.Message);
+		activity.SetTag("otel.status_description", description);
 		activity.AddEvent(new ActivityEvent("exception", tags: new ActivityTagsCollection
 		{
 			{ "exception.type", exception.GetType().FullName },
 			{ "exception.message", exception.Message },
 			{ "exception.stacktrace", exception.ToString() },
 		}));
+	}
+
+	public static void CopyTags(IEnumerable<KeyValuePair<string, object?>> tags, Activity? activity)
+	{
+		if (activity is { IsAllDataRequested: true })
+		{
+			foreach (var tag in tags)
+				activity.SetTag(tag.Key, tag.Value);
+		}
 	}
 
 	private static ActivitySource ActivitySource { get; } = CreateActivitySource();

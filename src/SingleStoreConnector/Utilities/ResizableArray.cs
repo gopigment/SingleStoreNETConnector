@@ -9,6 +9,8 @@ internal sealed class ResizableArray<T>
 	public T[]? Array => m_array;
 	public int Count => m_array?.Length ?? 0;
 
+	public Span<T> AsSpan(int start) => m_array.AsSpan(start);
+
 	/// <summary>
 	/// Do not call this method directly; use <see cref="Utility.Resize{T}"/>.
 	/// </summary>
@@ -18,5 +20,5 @@ internal sealed class ResizableArray<T>
 			System.Array.Resize(ref m_array, Math.Max(length, Count * 2));
 	}
 
-	T[]? m_array;
+	private T[]? m_array;
 }

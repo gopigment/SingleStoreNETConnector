@@ -5,11 +5,7 @@ namespace SingleStoreConnector.Protocol;
 
 internal readonly struct PayloadData : IDisposable
 {
-	public PayloadData(byte[] data, bool isPooled = false)
-	{
-		Memory = data;
-		m_isPooled = isPooled;
-	}
+	public PayloadData(byte[] data) => Memory = data;
 
 	public PayloadData(ReadOnlyMemory<byte> data, bool isPooled = false)
 	{
@@ -27,5 +23,5 @@ internal readonly struct PayloadData : IDisposable
 			ArrayPool<byte>.Shared.Return(arraySegment.Array!);
 	}
 
-	readonly bool m_isPooled;
+	private readonly bool m_isPooled;
 }

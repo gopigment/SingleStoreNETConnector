@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using SingleStoreConnector.Protocol;
 using SingleStoreConnector.Protocol.Payloads;
@@ -19,18 +20,18 @@ internal sealed class TypeMapper
 		m_mySqlDbTypeToColumnTypeMetadata = new();
 
 		// boolean
-		var typeBoolean = AddDbTypeMapping(new(typeof(bool), new[] { DbType.Boolean }, convert: static o => Convert.ToBoolean(o)));
+		var typeBoolean = AddDbTypeMapping(new(typeof(bool), new[] { DbType.Boolean }, convert: static o => Convert.ToBoolean(o, CultureInfo.InvariantCulture)));
 		AddColumnTypeMetadata(new("TINYINT", typeBoolean, SingleStoreDbType.Bool, isUnsigned: false, length: 1, columnSize: 1, simpleDataTypeName: "BOOL", createFormat: "BOOL"));
 
 		// integers
-		var typeSbyte = AddDbTypeMapping(new(typeof(sbyte), new[] { DbType.SByte }, convert: static o => Convert.ToSByte(o)));
-		var typeByte = AddDbTypeMapping(new(typeof(byte), new[] { DbType.Byte }, convert: static o => Convert.ToByte(o)));
-		var typeShort = AddDbTypeMapping(new(typeof(short), new[] { DbType.Int16 }, convert: static o => Convert.ToInt16(o)));
-		var typeUshort = AddDbTypeMapping(new(typeof(ushort), new[] { DbType.UInt16 }, convert: static o => Convert.ToUInt16(o)));
-		var typeInt = AddDbTypeMapping(new(typeof(int), new[] { DbType.Int32 }, convert: static o => Convert.ToInt32(o)));
-		var typeUint = AddDbTypeMapping(new(typeof(uint), new[] { DbType.UInt32 }, convert: static o => Convert.ToUInt32(o)));
-		var typeLong = AddDbTypeMapping(new(typeof(long), new[] { DbType.Int64 }, convert: static o => Convert.ToInt64(o)));
-		var typeUlong = AddDbTypeMapping(new(typeof(ulong), new[] { DbType.UInt64 }, convert: static o => Convert.ToUInt64(o)));
+		var typeSbyte = AddDbTypeMapping(new(typeof(sbyte), new[] { DbType.SByte }, convert: static o => Convert.ToSByte(o, CultureInfo.InvariantCulture)));
+		var typeByte = AddDbTypeMapping(new(typeof(byte), new[] { DbType.Byte }, convert: static o => Convert.ToByte(o, CultureInfo.InvariantCulture)));
+		var typeShort = AddDbTypeMapping(new(typeof(short), new[] { DbType.Int16 }, convert: static o => Convert.ToInt16(o, CultureInfo.InvariantCulture)));
+		var typeUshort = AddDbTypeMapping(new(typeof(ushort), new[] { DbType.UInt16 }, convert: static o => Convert.ToUInt16(o, CultureInfo.InvariantCulture)));
+		var typeInt = AddDbTypeMapping(new(typeof(int), new[] { DbType.Int32 }, convert: static o => Convert.ToInt32(o, CultureInfo.InvariantCulture)));
+		var typeUint = AddDbTypeMapping(new(typeof(uint), new[] { DbType.UInt32 }, convert: static o => Convert.ToUInt32(o, CultureInfo.InvariantCulture)));
+		var typeLong = AddDbTypeMapping(new(typeof(long), new[] { DbType.Int64 }, convert: static o => Convert.ToInt64(o, CultureInfo.InvariantCulture)));
+		var typeUlong = AddDbTypeMapping(new(typeof(ulong), new[] { DbType.UInt64 }, convert: static o => Convert.ToUInt64(o, CultureInfo.InvariantCulture)));
 		AddColumnTypeMetadata(new("TINYINT", typeSbyte, SingleStoreDbType.Byte, isUnsigned: false));
 		AddColumnTypeMetadata(new("TINYINT", typeByte, SingleStoreDbType.UByte, isUnsigned: true, length: 1));
 		AddColumnTypeMetadata(new("TINYINT", typeByte, SingleStoreDbType.UByte, isUnsigned: true));
@@ -45,10 +46,11 @@ internal sealed class TypeMapper
 		AddColumnTypeMetadata(new("BIT", typeUlong, SingleStoreDbType.Bit));
 
 		// decimals
-		var typeDecimal = AddDbTypeMapping(new(typeof(decimal), new[] { DbType.Decimal, DbType.Currency, DbType.VarNumeric }, convert: static o => Convert.ToDecimal(o)));
-		var typeDouble = AddDbTypeMapping(new(typeof(double), new[] { DbType.Double }, convert: static o => Convert.ToDouble(o)));
-		var typeFloat = AddDbTypeMapping(new(typeof(float), new[] { DbType.Single }, convert: static o => Convert.ToSingle(o)));
+		var typeDecimal = AddDbTypeMapping(new(typeof(decimal), new[] { DbType.Decimal, DbType.Currency, DbType.VarNumeric }, convert: static o => Convert.ToDecimal(o, CultureInfo.InvariantCulture)));
+		var typeDouble = AddDbTypeMapping(new(typeof(double), new[] { DbType.Double }, convert: static o => Convert.ToDouble(o, CultureInfo.InvariantCulture)));
+		var typeFloat = AddDbTypeMapping(new(typeof(float), new[] { DbType.Single }, convert: static o => Convert.ToSingle(o, CultureInfo.InvariantCulture)));
 		AddColumnTypeMetadata(new("DECIMAL", typeDecimal, SingleStoreDbType.NewDecimal, createFormat: "DECIMAL({0},{1});precision,scale"));
+		AddColumnTypeMetadata(new("DECIMAL", typeDecimal, SingleStoreDbType.NewDecimal, isUnsigned: true, createFormat: "DECIMAL({0},{1}) UNSIGNED;precision,scale"));
 		AddColumnTypeMetadata(new("DECIMAL", typeDecimal, SingleStoreDbType.Decimal));
 		AddColumnTypeMetadata(new("DOUBLE", typeDouble, SingleStoreDbType.Double));
 		AddColumnTypeMetadata(new("FLOAT", typeFloat, SingleStoreDbType.Float));
@@ -92,7 +94,7 @@ internal sealed class TypeMapper
 #if NET6_0_OR_GREATER
 		AddDbTypeMapping(new(typeof(TimeOnly), new[] { DbType.Time }));
 #endif
-		var typeTime = AddDbTypeMapping(new(typeof(TimeSpan), new[] { DbType.Time }, convert: static o => o is string s ? Utility.ParseTimeSpan(Encoding.UTF8.GetBytes(s)) : Convert.ChangeType(o, typeof(TimeSpan))));
+		var typeTime = AddDbTypeMapping(new(typeof(TimeSpan), new[] { DbType.Time }, convert: static o => o is string s ? Utility.ParseTimeSpan(Encoding.UTF8.GetBytes(s)) : Convert.ChangeType(o, typeof(TimeSpan), CultureInfo.InvariantCulture)));
 		AddColumnTypeMetadata(new("DATETIME", typeDateTime, SingleStoreDbType.DateTime));
 		AddColumnTypeMetadata(new("DATE", typeDate, SingleStoreDbType.Date));
 		AddColumnTypeMetadata(new("DATE", typeDate, SingleStoreDbType.Newdate));
@@ -101,7 +103,12 @@ internal sealed class TypeMapper
 		AddColumnTypeMetadata(new("YEAR", typeInt, SingleStoreDbType.Year));
 
 		// guid
-		var typeGuid = AddDbTypeMapping(new(typeof(Guid), new[] { DbType.Guid }, convert: static o => Guid.Parse(Convert.ToString(o)!)));
+#if NET7_0_OR_GREATER
+		Func<object, object> convertGuid = static o => Guid.Parse(Convert.ToString(o, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+#else
+		Func<object, object> convertGuid = static o => Guid.Parse(Convert.ToString(o, CultureInfo.InvariantCulture)!);
+#endif
+		var typeGuid = AddDbTypeMapping(new(typeof(Guid), new[] { DbType.Guid }, convert: convertGuid));
 		AddColumnTypeMetadata(new("CHAR", typeGuid, SingleStoreDbType.Guid, length: 36, simpleDataTypeName: "CHAR(36)", createFormat: "CHAR(36)"));
 
 		// null
@@ -130,8 +137,10 @@ internal sealed class TypeMapper
 		m_dbTypeMappingsByClrType[dbTypeMapping.ClrType] = dbTypeMapping;
 
 		if (dbTypeMapping.DbTypes is not null)
+		{
 			foreach (var dbType in dbTypeMapping.DbTypes)
 				m_dbTypeMappingsByDbType[dbType] = dbTypeMapping;
+		}
 
 		return dbTypeMapping;
 	}
@@ -295,7 +304,7 @@ internal sealed class TypeMapper
 			return SingleStoreDbType.Set;
 
 		default:
-			throw new NotImplementedException("ConvertToSingleStoreDbType for {0} is not implemented".FormatInvariant(columnDefinition.ColumnType));
+			throw new NotImplementedException($"ConvertToMySqlDbType for {columnDefinition.ColumnType} is not implemented");
 		}
 	}
 
@@ -331,7 +340,7 @@ internal sealed class TypeMapper
 			SingleStoreDbType.Geography => ColumnType.Geography,
 			SingleStoreDbType.GeographyPoint => ColumnType.GeographyPoint,
 			SingleStoreDbType.Null => ColumnType.Null,
-			_ => throw new NotImplementedException("ConvertToColumnTypeAndFlags for {0} is not implemented".FormatInvariant(dbType)),
+			_ => throw new NotImplementedException($"ConvertToColumnTypeAndFlags for {dbType} is not implemented"),
 		};
 		return (ushort) ((byte) columnType | (isUnsigned ? 0x8000 : 0));
 	}
@@ -341,9 +350,9 @@ internal sealed class TypeMapper
 		return m_columnTypeMetadataLookup.Values.AsEnumerable();
 	}
 
-	readonly List<ColumnTypeMetadata> m_columnTypeMetadata;
-	readonly Dictionary<Type, DbTypeMapping> m_dbTypeMappingsByClrType;
-	readonly Dictionary<DbType, DbTypeMapping> m_dbTypeMappingsByDbType;
-	readonly Dictionary<string, ColumnTypeMetadata> m_columnTypeMetadataLookup;
-	readonly Dictionary<SingleStoreDbType, ColumnTypeMetadata> m_mySqlDbTypeToColumnTypeMetadata;
+	private readonly List<ColumnTypeMetadata> m_columnTypeMetadata;
+	private readonly Dictionary<Type, DbTypeMapping> m_dbTypeMappingsByClrType;
+	private readonly Dictionary<DbType, DbTypeMapping> m_dbTypeMappingsByDbType;
+	private readonly Dictionary<string, ColumnTypeMetadata> m_columnTypeMetadataLookup;
+	private readonly Dictionary<SingleStoreDbType, ColumnTypeMetadata> m_mySqlDbTypeToColumnTypeMetadata;
 }

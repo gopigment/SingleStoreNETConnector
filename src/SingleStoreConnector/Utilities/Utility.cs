@@ -31,15 +31,11 @@ internal static class Utility
 	{
 		if (span.Length == 0)
 			return "";
-#if NET45
-		return encoding.GetString(span.ToArray());
-#else
 		unsafe
 		{
 			fixed (byte* ptr = &MemoryMarshal.GetReference(span))
 				return encoding.GetString(ptr, span.Length);
 		}
-#endif
 	}
 
 	public static unsafe int GetByteCount(this Encoding encoding, ReadOnlySpan<char> chars)
@@ -56,9 +52,11 @@ internal static class Utility
 	public static unsafe int GetBytes(this Encoding encoding, ReadOnlySpan<char> chars, Span<byte> bytes)
 	{
 		fixed (char* charsPtr = &MemoryMarshal.GetReference(chars))
-		fixed (byte* bytesPtr = &MemoryMarshal.GetReference(bytes))
 		{
-			return encoding.GetBytes(charsPtr, chars.Length, bytesPtr, bytes.Length);
+			fixed (byte* bytesPtr = &MemoryMarshal.GetReference(bytes))
+			{
+				return encoding.GetBytes(charsPtr, chars.Length, bytesPtr, bytes.Length);
+			}
 		}
 	}
 #endif
@@ -67,11 +65,13 @@ internal static class Utility
 	public static unsafe void Convert(this Encoder encoder, ReadOnlySpan<char> chars, Span<byte> bytes, bool flush, out int charsUsed, out int bytesUsed, out bool completed)
 	{
 		fixed (char* charsPtr = &MemoryMarshal.GetReference(chars))
-		fixed (byte* bytesPtr = &MemoryMarshal.GetReference(bytes))
 		{
-			// MemoryMarshal.GetNonNullPinnableReference is internal, so fake it by using an invalid but non-null pointer; this
-			// prevents Convert from throwing an exception when the output buffer is empty
-			encoder.Convert(charsPtr, chars.Length, bytesPtr is null ? (byte*) 1 : bytesPtr, bytes.Length, flush, out charsUsed, out bytesUsed, out completed);
+			fixed (byte* bytesPtr = &MemoryMarshal.GetReference(bytes))
+			{
+				// MemoryMarshal.GetNonNullPinnableReference is internal, so fake it by using an invalid but non-null pointer; this
+				// prevents Convert from throwing an exception when the output buffer is empty
+				encoder.Convert(charsPtr, chars.Length, bytesPtr is null ? (byte*) 1 : bytesPtr, bytes.Length, flush, out charsUsed, out bytesUsed, out completed);
+			}
 		}
 	}
 
@@ -118,35 +118,42 @@ internal static class Utility
 		}
 		else
 		{
+#if NETCOREAPP3_0_OR_GREATER
+			throw new FormatException(string.Concat("Unrecognized PEM header: ", key.AsSpan(0, Math.Min(key.Length, 80))));
+#else
 			throw new FormatException("Unrecognized PEM header: " + key.Substring(0, Math.Min(key.Length, 80)));
+#endif
 		}
 
 		var keyEndIndex = key.IndexOf(pemFooter, keyStartIndex, StringComparison.Ordinal);
 
 		if (keyEndIndex <= -1)
+#if NETCOREAPP3_0_OR_GREATER
+			throw new FormatException(string.Concat("Missing expected '", pemFooter, "' PEM footer: ", key.AsSpan(Math.Max(key.Length - 80, 0))));
+#else
 			throw new FormatException($"Missing expected '{pemFooter}' PEM footer: " + key.Substring(Math.Max(key.Length - 80, 0)));
+#endif
 
 #if NETCOREAPP2_1_OR_GREATER || NETSTANDARD2_1_OR_GREATER
-		var keyChars = key.AsSpan().Slice(keyStartIndex, keyEndIndex - keyStartIndex);
+		var keyChars = key.AsSpan()[keyStartIndex..keyEndIndex];
 		var bufferLength = keyChars.Length / 4 * 3;
 		byte[]? buffer = null;
-		Span<byte> bufferBytes = bufferLength <= 1024 ? stackalloc byte[bufferLength] : default;
+		scoped Span<byte> bufferBytes;
 		if (bufferLength > 1024)
-		{
-			buffer = ArrayPool<byte>.Shared.Rent(bufferLength);
-			bufferBytes = buffer.AsSpan();
-		}
+			bufferBytes = buffer = ArrayPool<byte>.Shared.Rent(bufferLength);
+		else
+			 bufferBytes = stackalloc byte[bufferLength];
 		try
 		{
 			if (!System.Convert.TryFromBase64Chars(keyChars, bufferBytes, out var bytesWritten))
 				throw new FormatException("The input is not a valid Base-64 string.");
 #if NET5_0_OR_GREATER
 			if (isPrivate)
-				rsa.ImportRSAPrivateKey(bufferBytes.Slice(0, bytesWritten), out var _);
+				rsa.ImportRSAPrivateKey(bufferBytes[..bytesWritten], out var _);
 			else
-				rsa.ImportSubjectPublicKeyInfo(bufferBytes.Slice(0, bytesWritten), out var _);
+				rsa.ImportSubjectPublicKeyInfo(bufferBytes[..bytesWritten], out var _);
 #else
-			return GetRsaParameters(bufferBytes.Slice(0, bytesWritten), isPrivate);
+			return GetRsaParameters(bufferBytes[..bytesWritten], isPrivate);
 #endif
 		}
 		finally
@@ -266,6 +273,7 @@ internal static class Utility
 	}
 #endif
 
+#if !NETSTANDARD2_1_OR_GREATER && !NETCOREAPP2_0_OR_GREATER
 	/// <summary>
 	/// Returns a new <see cref="ArraySegment{T}"/> that starts at index <paramref name="index"/> into <paramref name="arraySegment"/>.
 	/// </summary>
@@ -284,14 +292,16 @@ internal static class Utility
 	/// <returns>A new <see cref="ArraySegment{T}"/> of length <paramref name="length"/>, starting at the <paramref name="index"/>th element of <paramref name="arraySegment"/>.</returns>
 	public static ArraySegment<T> Slice<T>(this ArraySegment<T> arraySegment, int index, int length) =>
 		new ArraySegment<T>(arraySegment.Array!, arraySegment.Offset + index, length);
+#endif
 
+#if !NET5_0_OR_GREATER
 	/// <summary>
-	/// Returns a new <see cref="T:byte[]"/> that is a slice of <paramref name="input"/> starting at <paramref name="offset"/>.
+	/// Returns a new <see cref="byte"/> array that is a slice of <paramref name="input"/> starting at <paramref name="offset"/>.
 	/// </summary>
 	/// <param name="input">The array to slice.</param>
 	/// <param name="offset">The offset at which to slice.</param>
 	/// <param name="length">The length of the slice.</param>
-	/// <returns>A new <see cref="T:byte[]"/> that is a slice of <paramref name="input"/> from <paramref name="offset"/> to the end.</returns>
+	/// <returns>A new <see cref="byte"/> array that is a slice of <paramref name="input"/> from <paramref name="offset"/> to the end.</returns>
 	public static byte[] ArraySlice(byte[] input, int offset, int length)
 	{
 		if (offset == 0 && length == input.Length)
@@ -300,6 +310,7 @@ internal static class Utility
 		Array.Copy(input, offset, slice, 0, slice.Length);
 		return slice;
 	}
+#endif
 
 	/// <summary>
 	/// Finds the next index of <paramref name="pattern"/> in <paramref name="data"/>, starting at index <paramref name="offset"/>.
@@ -310,19 +321,8 @@ internal static class Utility
 	/// <returns>The offset of <paramref name="pattern"/> within <paramref name="data"/>, or <c>-1</c> if <paramref name="pattern"/> was not found.</returns>
 	public static int FindNextIndex(ReadOnlySpan<byte> data, int offset, ReadOnlySpan<byte> pattern)
 	{
-		var limit = data.Length - pattern.Length;
-		for (var start = offset; start <= limit; start++)
-		{
-			var i = 0;
-			for (; i < pattern.Length; i++)
-			{
-				if (data[start + i] != pattern[i])
-					break;
-			}
-			if (i == pattern.Length)
-				return start;
-		}
-		return -1;
+		var index = MemoryExtensions.IndexOf(data.Slice(offset), pattern);
+		return index == -1 ? -1 : offset + index;
 	}
 
 	/// <summary>
@@ -383,8 +383,11 @@ internal static class Utility
 		var userIndex = header.IndexOf(isCommunityFormat ? "/?user=" : "/user=", StringComparison.Ordinal);
 		if (userIndex == -1)
 			return false;
-
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP2_1_OR_GREATER
+		if (!int.TryParse(header.AsSpan(portIndex, userIndex - portIndex), out port) || port <= 0)
+#else
 		if (!int.TryParse(header.Substring(portIndex, userIndex - portIndex), out port) || port <= 0)
+#endif
 			return false;
 
 		userIndex += isCommunityFormat ? 7 : 6;
@@ -402,10 +405,10 @@ internal static class Utility
 
 		// parse (optional) leading minus sign
 		var isNegative = false;
-		if (value.Length > 0 && value[0] == 0x2D)
+		if (value is [0x2D, .. ])
 		{
 			isNegative = true;
-			value = value.Slice(1);
+			value = value[1..];
 		}
 
 		// parse hours (0-838)
@@ -420,7 +423,7 @@ internal static class Utility
 			goto InvalidTimeSpan;
 		if (value.Length < 3 || value[2] != 58)
 			goto InvalidTimeSpan;
-		value = value.Slice(3);
+		value = value[3..];
 
 		// parse seconds (0-59)
 		if (!Utf8Parser.TryParse(value, out int seconds, out bytesConsumed) || bytesConsumed != 2 || seconds < 0 || seconds > 59)
@@ -435,7 +438,7 @@ internal static class Utility
 		{
 			if (value[2] != 46)
 				goto InvalidTimeSpan;
-			value = value.Slice(3);
+			value = value[3..];
 			if (!Utf8Parser.TryParse(value, out microseconds, out bytesConsumed) || bytesConsumed != value.Length || microseconds < 0 || microseconds > 999_999)
 				goto InvalidTimeSpan;
 			for (; bytesConsumed < 6; bytesConsumed++)
@@ -449,43 +452,15 @@ internal static class Utility
 			seconds = -seconds;
 			microseconds = -microseconds;
 		}
+#if NET7_0_OR_GREATER
+		return new TimeSpan(0, hours, minutes, seconds, microseconds / 1000, microseconds % 1000);
+#else
 		return new TimeSpan(0, hours, minutes, seconds, microseconds / 1000) + TimeSpan.FromTicks(microseconds % 1000 * 10);
+#endif
 
 		InvalidTimeSpan:
 		throw new FormatException("Couldn't interpret '{0}' as a valid TimeSpan".FormatInvariant(Encoding.UTF8.GetString(originalValue)));
 	}
-
-#if NET45
-	public static Task CompletedTask
-	{
-		get
-		{
-			if (s_completedTask is null)
-			{
-				var tcs = new TaskCompletionSource<object>();
-				tcs.SetResult(tcs);
-				s_completedTask = tcs.Task;
-			}
-			return s_completedTask;
-		}
-	}
-	static Task? s_completedTask;
-
-	public static Task TaskFromException(Exception exception) => TaskFromException<object>(exception);
-	public static Task<T> TaskFromException<T>(Exception exception)
-	{
-		var tcs = new TaskCompletionSource<T>();
-		tcs.SetException(exception);
-		return tcs.Task;
-	}
-
-	public static byte[] EmptyByteArray { get; } = new byte[0];
-#else
-	public static Task CompletedTask => Task.CompletedTask;
-	public static Task TaskFromException(Exception exception) => Task.FromException(exception);
-	public static Task<T> TaskFromException<T>(Exception exception) => Task.FromException<T>(exception);
-	public static byte[] EmptyByteArray { get; } = Array.Empty<byte>();
-#endif
 
 #if !NETCOREAPP2_1_OR_GREATER && !NETSTANDARD2_1_OR_GREATER
 	public static bool TryComputeHash(this HashAlgorithm hashAlgorithm, ReadOnlySpan<byte> source, Span<byte> destination, out int bytesWritten)
@@ -500,30 +475,13 @@ internal static class Utility
 
 	public static byte[] TrimZeroByte(byte[] value)
 	{
-		if (value[value.Length - 1] == 0)
+		if (value is [ .., 0])
 			Array.Resize(ref value, value.Length - 1);
 		return value;
 	}
 
 	public static ReadOnlySpan<byte> TrimZeroByte(ReadOnlySpan<byte> value) =>
-		value[value.Length - 1] == 0 ? value.Slice(0, value.Length - 1) : value;
-
-#if NET45
-	public static bool TryGetBuffer(this MemoryStream memoryStream, out ArraySegment<byte> buffer)
-	{
-		try
-		{
-			var rawBuffer = memoryStream.GetBuffer();
-			buffer = new(rawBuffer, 0, checked((int) memoryStream.Length));
-			return true;
-		}
-		catch (UnauthorizedAccessException)
-		{
-			buffer = default;
-			return false;
-		}
-	}
-#endif
+		value is [ .., 0 ] ? value[..^1] : value;
 
 #if !NETCOREAPP2_1_OR_GREATER && !NETSTANDARD2_1_OR_GREATER
 	public static int Read(this Stream stream, Memory<byte> buffer)
@@ -562,7 +520,7 @@ internal static class Utility
 		bytes[offset2] = swap;
 	}
 
-#if NET45 || NET461
+#if NET461
 	public static bool IsWindows() => Environment.OSVersion.Platform == PlatformID.Win32NT;
 
 	public static void GetOSDetails(out string? os, out string osDescription, out string architecture)
@@ -601,7 +559,7 @@ internal static class Utility
 	}
 #endif
 
-#if NET45 || NET461
+#if NET461
 	public static SslProtocols GetDefaultSslProtocols()
 	{
 		if (!s_defaultSslProtocols.HasValue)
@@ -631,7 +589,7 @@ internal static class Utility
 		return s_defaultSslProtocols.Value;
 	}
 
-	static SslProtocols? s_defaultSslProtocols;
+	private static SslProtocols? s_defaultSslProtocols;
 #else
 	public static SslProtocols GetDefaultSslProtocols() => SslProtocols.None;
 #endif
@@ -672,13 +630,13 @@ internal static class Utility
 	private static bool TryReadAsnInteger(ReadOnlySpan<byte> data, out ReadOnlySpan<byte> number, out int bytesConsumed)
 	{
 		// integer tag is 2
-		if (data[0] != 0x02)
+		if (data is not [ 0x02, .. ])
 		{
 			number = default;
 			bytesConsumed = 0;
 			return false;
 		}
-		data = data.Slice(1);
+		data = data[1..];
 
 		// tag is followed by the length of the integer
 		if (!TryReadAsnLength(data, out var length, out var lengthBytesConsumed))
@@ -693,8 +651,8 @@ internal static class Utility
 		bytesConsumed = lengthBytesConsumed + length + 1;
 
 		// trim leading zero bytes
-		while (number.Length > 1 && number[0] == 0)
-			number = number.Slice(1);
+		while (number is [ 0, _, .. ])
+			number = number[1..];
 
 		return true;
 	}

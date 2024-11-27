@@ -2,7 +2,7 @@ version: 2.1
 parameters:
   connector-version:
     type: string
-    default: "1.0.1"
+    default: "1.1.4"
 
 orbs:
   win: circleci/windows@2.4.0
@@ -12,16 +12,16 @@ commands:
     description: Setup Linux environment
     steps:
       - run:
-          name: Install .NET Core 6.0
+          name: Install .NET Core 7.0
           command: |
-            wget https://packages.microsoft.com/config/ubuntu/21.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+            wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
             sudo dpkg -i packages-microsoft-prod.deb
             rm packages-microsoft-prod.deb
             sudo apt-get update
             sudo apt-get install -y apt-transport-https
             sudo apt-get update
             sudo apt-get install -y mariadb-client-core-10.3
-            sudo apt-get install -y dotnet-sdk-6.0
+            sudo apt-get install -y dotnet-sdk-7.0
             dotnet --info
   run-tests-win:
     description: Run tests on Windows
@@ -61,7 +61,7 @@ jobs:
           name: Fill test config
           command: python.exe .circleci\fill_test_config.py
       - run-tests-win:
-          target_framework: net6.0
+          target_framework: net7.0
       - run:
           name: Terminate test cluster
           when: always
@@ -94,24 +94,24 @@ jobs:
             sed -i "s|SINGLESTORE_HOST|127.0.0.1|g" tests/SideBySide/config.json
             sed -i "s|SQL_USER_PASSWORD|${SQL_USER_PASSWORD}|g" tests/SideBySide/config.json
             sed -i "s|SQL_USER_NAME|root|g" tests/SideBySide/config.json
-            cp tests/SideBySide/config.json tests/SideBySide/bin/Release/net6.0/config.json
+            cp tests/SideBySide/config.json tests/SideBySide/bin/Release/net7.0/config.json
       - run:
           name: Unit tests
           command: |
             cd tests/SingleStoreConnector.Tests
-            dotnet test -f net6.0 -c Release --no-build
+            dotnet test -f net7.0 -c Release --no-build
             cd ../../
       - run:
           name: Conformance tests
           command: |
             cd tests/Conformance.Tests/
-            dotnet test -f net6.0 -c Release --no-build
+            dotnet test -f net7.0 -c Release --no-build
             cd ../../
       - run:
           name: SideBySide tests
           command: |
             cd tests/SideBySide
-            dotnet test -f net6.0 -c Release --no-build
+            dotnet test -f net7.0 -c Release --no-build
             cd ../../
 
   publish-windows:
@@ -139,6 +139,18 @@ workflows:
   build_and_test:
     jobs:
       - test-ubuntu:
+          name: Test 8.1 cluster-in-a-box
+          matrix:
+            parameters:
+              singlestore_image:
+                - singlestore/cluster-in-a-box:alma-8.1.12-93bb04ec6c-4.0.13-1.17.0
+      - test-ubuntu:
+          name: Test 8.0 cluster-in-a-box
+          matrix:
+            parameters:
+              singlestore_image:
+                - singlestore/cluster-in-a-box:alma-8.0.19-f48780d261-4.0.11-1.16.0
+      - test-ubuntu:
           name: Test 7.8 cluster-in-a-box
           matrix:
             parameters:
@@ -156,12 +168,6 @@ workflows:
             parameters:
               singlestore_image:
                 - singlestore/cluster-in-a-box:centos-7.5.12-3112a491c2-4.0.0-1.12.5
-      - test-ubuntu:
-          name: Test 7.3 cluster-in-a-box
-          matrix:
-            parameters:
-              singlestore_image:
-                - singlestore/cluster-in-a-box:centos-7.3.13-761e3259b3-3.2.11-1.11.9
       - test-windows:
           name: Test S2MS on Windows
   publish:

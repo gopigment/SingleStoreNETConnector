@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using SingleStoreConnector.Core;
 using SingleStoreConnector.Protocol.Serialization;
+using SingleStoreConnector.Utilities;
 using Xunit;
 
 namespace SingleStoreConnector.Tests;
@@ -23,7 +24,7 @@ public class StatementPreparerTests
 		var parameters = new SingleStoreParameterCollection();
 		parameters.AddWithValue("@param", 123);
 		var parsedSql = GetParsedSql(sql, parameters);
-		Assert.Equal(sql.Replace("@param", "123") + ";", parsedSql);
+		Assert.Equal(sql.Replace("@param", "123"), parsedSql);
 	}
 
 	[Theory]
@@ -131,7 +132,7 @@ SELECT @'var' as R")]
 		var parameters = new SingleStoreParameterCollection();
 		parameters.AddWithValue("@foo", 22);
 		var parsedSql = GetParsedSql(sql, parameters, StatementPreparerOptions.AllowUserVariables);
-		Assert.Equal(sql.Replace("@foo", "22") + ";", parsedSql);
+		Assert.Equal(sql.Replace("@foo", "22"), parsedSql);
 	}
 
 	[Theory]
@@ -156,7 +157,11 @@ SELECT @'var' as R")]
 			new object[] { 3_456_789_012u, "3456789012" },
 			new object[] { -12_345_678_901L, "-12345678901" },
 			new object[] { 12_345_678_901UL, "12345678901" },
+#if NET481
+			new object[] { 1.0123456f, "1.01234555" },
+#else
 			new object[] { 1.0123456f, "1.0123456" },
+#endif
 			new object[] { 1.0123456789012346, "1.0123456789012346" },
 			new object[] { 123456789.123456789m, "123456789.123456789" },
 			new object[] { "1234", "'1234'" },
@@ -200,24 +205,33 @@ SELECT @'var' as R")]
 	}
 
 	[Theory]
-	[InlineData("SELECT 1;", "SELECT 1;", true)]
-	[InlineData("SELECT 1", "SELECT 1;", true)]
-	[InlineData("SELECT 1 -- comment", "SELECT 1 -- comment\n;", true)]
-	[InlineData("SELECT 1 # comment", "SELECT 1 # comment\n;", true)]
-	[InlineData("SELECT '1", "SELECT '1", false)]
-	[InlineData("SELECT '1' /* test", "SELECT '1' /* test", false)]
-	[InlineData("SELECT '1';", "SELECT '1';", true)]
-	[InlineData("SELECT '1'", "SELECT '1';", true)]
-	[InlineData("SELECT \"1\";", "SELECT \"1\";", true)]
-	[InlineData("SELECT \"1\"", "SELECT \"1\";", true)]
-	[InlineData("SELECT * FROM `SELECT`;", "SELECT * FROM `SELECT`;", true)]
-	[InlineData("SELECT * FROM `SELECT`", "SELECT * FROM `SELECT`;", true)]
-	[InlineData("SELECT * FROM test WHERE id = ?;", "SELECT * FROM test WHERE id = 0;", true)]
-	[InlineData("SELECT * FROM test WHERE id = ?", "SELECT * FROM test WHERE id = 0;", true)]
-	public void CompleteStatements(string sql, string expectedSql, bool expectedComplete)
+	[InlineData("SELECT 1;", "SELECT 1;", false, true)]
+	[InlineData("SELECT 1;", "SELECT 1;", true, true)]
+	[InlineData("SELECT 1", "SELECT 1", false, true)]
+	[InlineData("SELECT 1", "SELECT 1;", true, true)]
+	[InlineData("SELECT 1 -- comment", "SELECT 1 -- comment\n", false, true)]
+	[InlineData("SELECT 1 -- comment", "SELECT 1 -- comment\n;", true, true)]
+	[InlineData("SELECT 1 # comment", "SELECT 1 # comment\n", false, true)]
+	[InlineData("SELECT 1 # comment", "SELECT 1 # comment\n;", true, true)]
+	[InlineData("SELECT '1", "SELECT '1", false, false)]
+	[InlineData("SELECT '1", "SELECT '1", true, false)]
+	[InlineData("SELECT '1' /* test", "SELECT '1' /* test", false, false)]
+	[InlineData("SELECT '1';", "SELECT '1';", false, true)]
+	[InlineData("SELECT '1';", "SELECT '1';", true, true)]
+	[InlineData("SELECT '1'", "SELECT '1'", false, true)]
+	[InlineData("SELECT '1'", "SELECT '1';", true, true)]
+	[InlineData("SELECT \"1\";", "SELECT \"1\";", false, true)]
+	[InlineData("SELECT \"1\";", "SELECT \"1\";", true, true)]
+	[InlineData("SELECT \"1\"", "SELECT \"1\"", false, true)]
+	[InlineData("SELECT \"1\"", "SELECT \"1\";", true, true)]
+	[InlineData("SELECT * FROM `SELECT`;", "SELECT * FROM `SELECT`;", false, true)]
+	[InlineData("SELECT * FROM `SELECT`", "SELECT * FROM `SELECT`", false, true)]
+	[InlineData("SELECT * FROM test WHERE id = ?;", "SELECT * FROM test WHERE id = 0;", false, true)]
+	[InlineData("SELECT * FROM test WHERE id = ?", "SELECT * FROM test WHERE id = 0", false, true)]
+	public void CompleteStatements(string sql, string expectedSql, bool appendSemicolon, bool expectedComplete)
 	{
 		var parameters = new SingleStoreParameterCollection { new() { Value = 0 } };
-		var preparer = new StatementPreparer(sql, parameters, new StatementPreparerOptions());
+		var preparer = new StatementPreparer(sql, parameters, appendSemicolon ? StatementPreparerOptions.AppendSemicolon : StatementPreparerOptions.None);
 		var writer = new ByteBufferWriter();
 		var isComplete = preparer.ParseAndBindParameters(writer);
 		Assert.Equal(expectedComplete, isComplete);

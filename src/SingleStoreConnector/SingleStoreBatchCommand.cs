@@ -2,6 +2,10 @@ using SingleStoreConnector.Core;
 
 namespace SingleStoreConnector;
 
+#if !NET6_0_OR_GREATER
+#pragma warning disable CA1822 // Mark members as static
+#endif
+
 public sealed class SingleStoreBatchCommand :
 #if NET6_0_OR_GREATER
 	DbBatchCommand,
@@ -71,6 +75,6 @@ public sealed class SingleStoreBatchCommand :
 
 	internal SingleStoreBatch? Batch { get; set; }
 
-	SingleStoreParameterCollection? m_parameterCollection;
-	long m_lastInsertedId;
+	private SingleStoreParameterCollection? m_parameterCollection;
+	private long m_lastInsertedId;
 }

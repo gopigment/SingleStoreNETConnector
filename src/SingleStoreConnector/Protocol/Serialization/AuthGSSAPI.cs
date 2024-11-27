@@ -20,6 +20,8 @@ internal static class NegotiateStreamConstants
 	public const ushort MaxPayloadLength = ushort.MaxValue;
 }
 
+#pragma warning disable CA1844 // Provide memory-based overrides of async methods when subclassing 'Stream'
+
 /// <summary>
 /// Helper class to translate NegotiateStream framing for SPNEGO token
 /// into SingleStore protocol packets.
@@ -33,13 +35,13 @@ internal static class NegotiateStreamConstants
 /// </summary>
 internal class NegotiateToSingleStoreConverterStream : Stream
 {
-	readonly MemoryStream m_writeBuffer;
-	readonly ServerSession m_serverSession;
-	readonly IOBehavior m_ioBehavior;
-	readonly CancellationToken m_cancellationToken;
-	MemoryStream m_readBuffer;
-	int m_writePayloadLength;
-	bool m_clientHandshakeDone;
+	private readonly MemoryStream m_writeBuffer;
+	private readonly ServerSession m_serverSession;
+	private readonly IOBehavior m_ioBehavior;
+	private readonly CancellationToken m_cancellationToken;
+	private MemoryStream m_readBuffer;
+	private int m_writePayloadLength;
+	private bool m_clientHandshakeDone;
 
 	public PayloadData? MySQLProtocolPayload { get; private set; }
 	public NegotiateToSingleStoreConverterStream(ServerSession serverSession, IOBehavior ioBehavior, CancellationToken cancellationToken)
@@ -51,7 +53,7 @@ internal class NegotiateToSingleStoreConverterStream : Stream
 		m_cancellationToken = cancellationToken;
 	}
 
-	static void CreateNegotiateStreamMessageHeader(byte[] buffer, int offset, byte messageId, long payloadLength)
+	private static void CreateNegotiateStreamMessageHeader(byte[] buffer, int offset, byte messageId, long payloadLength)
 	{
 		buffer[offset] = messageId;
 		buffer[offset+1] = NegotiateStreamConstants.MajorVersion;
@@ -80,7 +82,7 @@ internal class NegotiateToSingleStoreConverterStream : Stream
 			var payloadMemory = payload.Memory;
 
 			if (payloadMemory.Length > NegotiateStreamConstants.MaxPayloadLength)
-				throw new InvalidDataException(string.Format("Payload too big for NegotiateStream - {0} bytes", payloadMemory.Length));
+				throw new InvalidDataException("Payload too big for NegotiateStream - {0} bytes".FormatInvariant(payloadMemory.Length));
 
 			// Check the first byte of the incoming packet.
 			// It can be an OK packet indicating end of server processing,
@@ -93,7 +95,7 @@ internal class NegotiateToSingleStoreConverterStream : Stream
 				CreateNegotiateStreamMessageHeader(buffer, offset, NegotiateStreamConstants.HandshakeDone, 0);
 				return NegotiateStreamConstants.HeaderLength;
 			case 0x1:
-				payloadMemory = payloadMemory.Slice(1);
+				payloadMemory = payloadMemory[1..];
 				break;
 			}
 
@@ -133,7 +135,7 @@ internal class NegotiateToSingleStoreConverterStream : Stream
 				minorProtocolVersion != NegotiateStreamConstants.MinorVersion)
 			{
 				throw new FormatException(
-					string.Format("Unknown version of NegotiateStream protocol {0}.{1}, expected {2}.{3}",
+					"Unknown version of NegotiateStream protocol {0}.{1}, expected {2}.{3}".FormatInvariant(
 					majorProtocolVersion, minorProtocolVersion,
 					NegotiateStreamConstants.MajorVersion, NegotiateStreamConstants.MinorVersion));
 			}
@@ -141,8 +143,7 @@ internal class NegotiateToSingleStoreConverterStream : Stream
 				messageId != NegotiateStreamConstants.HandshakeError &&
 				messageId != NegotiateStreamConstants.HandshakeInProgress)
 			{
-				throw new FormatException(
-					string.Format("Invalid NegotiateStream MessageId 0x{0:X2}", messageId));
+				throw new FormatException("Invalid NegotiateStream MessageId 0x{0:X2}".FormatInvariant(messageId));
 			}
 
 			m_writePayloadLength = (int) payloadSizeLow + ((int) payloadSizeHigh << 8);
@@ -225,9 +226,7 @@ internal static class AuthGSSAPI
 		if (cs.ServerSPN.Length != 0 && !negotiateStream.IsMutuallyAuthenticated)
 		{
 			// Negotiate used NTLM fallback, server name cannot be verified.
-			throw new AuthenticationException(string.Format(
-				"GSSAPI : Unable to verify server principal name using authentication type {0}",
-				negotiateStream.RemoteIdentity?.AuthenticationType));
+			throw new AuthenticationException("GSSAPI : Unable to verify server principal name using authentication type {0}".FormatInvariant(negotiateStream.RemoteIdentity?.AuthenticationType));
 		}
 		if (innerStream.MySQLProtocolPayload is PayloadData payload)
 			// return already pre-read OK packet.

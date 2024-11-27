@@ -3,12 +3,15 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using SingleStoreConnector.Core;
+using SingleStoreConnector.Logging;
 using SingleStoreConnector.Protocol.Serialization;
 using SingleStoreConnector.Utilities;
 
 namespace SingleStoreConnector;
 
-#if NET45 || NET461
+#pragma warning disable CA1010 // Generic interface should also be implemented
+
+#if NET461
 public sealed class SingleStoreDataReader : DbDataReader
 #else
 public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerator
@@ -71,7 +74,7 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 						using (Command.CancellableCommand.RegisterCancel(cancellationToken))
 						{
 							var writer = new ByteBufferWriter();
-							if (!Command.Connection!.Session.IsCancelingQuery && m_payloadCreator.WriteQueryCommand(ref m_commandListPosition, m_cachedProcedures!, writer))
+							if (!Command.Connection!.Session.IsCancelingQuery && m_payloadCreator.WriteQueryCommand(ref m_commandListPosition, m_cachedProcedures!, writer, false))
 							{
 								using var payload = writer.ToPayloadData();
 								await Command.Connection.Session.SendAsync(payload, ioBehavior, cancellationToken).ConfigureAwait(false);
@@ -120,6 +123,9 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 			if (mySqlException?.ErrorCode == SingleStoreErrorCode.QueryInterrupted && Command!.CancellableCommand.IsTimedOut)
 				throw SingleStoreException.CreateForTimeout(mySqlException);
 
+			if (mySqlException?.ErrorCode == SingleStoreErrorCode.QueryInterrupted)
+				Log.Trace("Session{0} got QueryInterrupted exception, but not because of the CommandTimeout or CancellationToken (SingleStoreDataReader.cs)", Command!.Connection!.Session.Id);
+
 			if (mySqlException is not null)
 			{
 				ServerSession.ThrowIfStatementContainsDelimiter(mySqlException, Command!);
@@ -133,7 +139,7 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 		m_hasWarnings = m_resultSet.WarningCount != 0;
 	}
 
-	private ValueTask<int> ScanResultSetAsync(IOBehavior ioBehavior, ResultSet resultSet, CancellationToken cancellationToken)
+	private ValueTask ScanResultSetAsync(IOBehavior ioBehavior, ResultSet resultSet, CancellationToken cancellationToken)
 	{
 		if (!m_hasMoreResults)
 			return default;
@@ -147,10 +153,10 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 		if (resultSet.BufferState != ResultSetState.HasMoreData)
 			throw new InvalidOperationException("Invalid state: {0}".FormatInvariant(resultSet.BufferState));
 
-		return new ValueTask<int>(ScanResultSetAsyncAwaited(ioBehavior, resultSet, cancellationToken));
+		return new ValueTask(ScanResultSetAsyncAwaited(ioBehavior, resultSet, cancellationToken));
 	}
 
-	private async Task<int> ScanResultSetAsyncAwaited(IOBehavior ioBehavior, ResultSet resultSet, CancellationToken cancellationToken)
+	private async Task ScanResultSetAsyncAwaited(IOBehavior ioBehavior, ResultSet resultSet, CancellationToken cancellationToken)
 	{
 		using (Command!.CancellableCommand.RegisterCancel(cancellationToken))
 		{
@@ -158,7 +164,6 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 			{
 				await resultSet.ReadResultSetHeaderAsync(ioBehavior).ConfigureAwait(false);
 				m_hasMoreResults = resultSet.BufferState != ResultSetState.NoMoreData;
-				return 0;
 			}
 			catch (SingleStoreException ex) when (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted)
 			{
@@ -202,6 +207,13 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 	}
 
 	public override bool IsClosed => Command is null;
+
+	/// <summary>
+	/// Gets the number of rows changed, inserted, or deleted by execution of the SQL statement.
+	/// </summary>
+	/// <remarks>For UPDATE, INSERT, and DELETE statements, the return value is the number of rows affected by the command.
+	/// For stored procedures, the return value is the number of rows affected by the last statement in the stored procedure,
+	/// or zero if the last statement is a SELECT. For all other types of statements, the return value is -1.</remarks>
 	public override int RecordsAffected => RealRecordsAffected is ulong recordsAffected ? checked((int) recordsAffected) : -1;
 	public override int GetOrdinal(string name) => GetResultSet().GetOrdinal(name);
 
@@ -217,6 +229,8 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 	public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
 		=> GetResultSet().GetCurrentRow().GetBytes(ordinal, dataOffset, buffer, bufferOffset, length);
 
+	public long GetBytes(string name, long dataOffset, byte[]? buffer, int bufferOffset, int length)
+		=> GetResultSet().GetCurrentRow().GetBytes(GetOrdinal(name), dataOffset, buffer, bufferOffset, length);
 	public override char GetChar(int ordinal) => GetResultSet().GetCurrentRow().GetChar(ordinal);
 	public char GetChar(string name) => GetChar(GetOrdinal(name));
 
@@ -469,8 +483,14 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 				await dataReader.NextResultAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 			}
 		}
-		catch (Exception)
+		catch (Exception ex)
 		{
+			if (activity is { IsAllDataRequested: true })
+			{
+				activity.SetException(ex);
+				activity.Stop();
+			}
+			dataReader.m_creationFailed = true;
 			dataReader.Dispose();
 			throw;
 		}
@@ -599,9 +619,11 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 					{
 					}
 				}
-				catch (SingleStoreException ex) when (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted)
+				catch (SingleStoreException ex)
 				{
-					// ignore "Query execution was interrupted" exceptions when closing a data reader
+					// ignore "Query execution was interrupted" exceptions when closing a data reader; log other exceptions
+					if (ex.ErrorCode != SingleStoreErrorCode.QueryInterrupted)
+						Log.Warn("Session{0} ignoring exception in SingleStoreDataReader.DisposeAsync. Message: {1}. CommandText: {2}", Command.Connection.Session.Id, ex.Message, Command.CommandText);
 				}
 				m_resultSet = null;
 			}
@@ -612,7 +634,8 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 			Command.CancellableCommand.SetTimeout(Constants.InfiniteTimeout);
 			connection.FinishQuerying(m_hasWarnings);
 
-			Activity?.SetSuccess();
+			if (!m_creationFailed)
+				Activity?.SetSuccess();
 			Activity?.Stop();
 
 			if ((m_behavior & CommandBehavior.CloseConnection) != 0)
@@ -666,13 +689,16 @@ public sealed class SingleStoreDataReader : DbDataReader, IDbColumnSchemaGenerat
 		return m_resultSet;
 	}
 
-	readonly CommandBehavior m_behavior;
-	readonly ICommandPayloadCreator m_payloadCreator;
-	readonly IDictionary<string, CachedProcedure?>? m_cachedProcedures;
-	CommandListPosition m_commandListPosition;
-	bool m_closed;
-	bool m_hasWarnings;
-	ResultSet? m_resultSet;
-	bool m_hasMoreResults;
-	DataTable? m_schemaTable;
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleStoreDataReader));
+
+	private readonly CommandBehavior m_behavior;
+	private readonly ICommandPayloadCreator m_payloadCreator;
+	private readonly IDictionary<string, CachedProcedure?>? m_cachedProcedures;
+	private CommandListPosition m_commandListPosition;
+	private bool m_closed;
+	private bool m_hasWarnings;
+	private bool m_hasMoreResults;
+	private bool m_creationFailed;
+	private ResultSet? m_resultSet;
+	private DataTable? m_schemaTable;
 }

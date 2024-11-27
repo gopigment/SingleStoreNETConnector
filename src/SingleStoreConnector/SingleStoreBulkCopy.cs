@@ -1,5 +1,7 @@
 using System.Buffers;
 using System.Buffers.Text;
+using System.Globalization;
+using System.Numerics;
 using System.Text;
 using SingleStoreConnector.Core;
 using SingleStoreConnector.Logging;
@@ -53,6 +55,11 @@ public sealed class SingleStoreBulkCopy
 		m_transaction = transaction;
 		ColumnMappings = new();
 	}
+
+	/// <summary>
+	/// A <see cref="SingleStoreBulkLoaderConflictOption"/> value that specifies how conflicts are resolved (default <see cref="SingleStoreBulkLoaderConflictOption.None"/>).
+	/// </summary>
+	public SingleStoreBulkLoaderConflictOption ConflictOption { get; set; }
 
 	/// <summary>
 	/// The number of seconds for the operation to complete before it times out, or <c>0</c> for no timeout.
@@ -245,6 +252,7 @@ public sealed class SingleStoreBulkCopy
 			Source = this,
 			TableName = tableName,
 			Timeout = BulkCopyTimeout,
+			ConflictOption = ConflictOption,
 		};
 
 		var closeConnection = false;
@@ -301,7 +309,7 @@ public sealed class SingleStoreBulkCopy
 			else
 			{
 				if (columnMapping.DestinationColumn.Length == 0)
-					throw new InvalidOperationException("SingleStoreBulkCopyColumnMapping.DestinationName is not set for SourceOrdinal {0}".FormatInvariant(columnMapping.SourceOrdinal));
+					throw new InvalidOperationException($"SingleStoreBulkCopyColumnMapping.DestinationName is not set for SourceOrdinal {columnMapping.SourceOrdinal}");
 				if (columnMapping.DestinationColumn[0] == '@')
 					bulkLoader.Columns.Add(columnMapping.DestinationColumn);
 				else
@@ -314,7 +322,7 @@ public sealed class SingleStoreBulkCopy
 		foreach (var columnMapping in columnMappings)
 		{
 			if (columnMapping.SourceOrdinal < 0 || columnMapping.SourceOrdinal >= m_valuesEnumerator.FieldCount)
-				throw new InvalidOperationException("SourceOrdinal {0} is an invalid value".FormatInvariant(columnMapping.SourceOrdinal));
+				throw new InvalidOperationException($"SourceOrdinal {columnMapping.SourceOrdinal} is an invalid value");
 		}
 
 		var errors = new List<SingleStoreError>();
@@ -336,10 +344,10 @@ public sealed class SingleStoreBulkCopy
 
 		Log.Debug("Finished bulk copy to {0}", tableName);
 
-		if (!m_wasAborted && rowsInserted != m_rowsCopied)
+		if (!m_wasAborted && rowsInserted != m_rowsCopied && ConflictOption is SingleStoreBulkLoaderConflictOption.None)
 		{
 			Log.Error("Bulk copy to DestinationTableName={0} failed; RowsCopied={1}; RowsInserted={2}", tableName, m_rowsCopied, rowsInserted);
-			throw new SingleStoreException(SingleStoreErrorCode.BulkCopyFailed, "{0} rows were copied to {1} but only {2} were inserted.".FormatInvariant(m_rowsCopied, tableName, rowsInserted));
+			throw new SingleStoreException(SingleStoreErrorCode.BulkCopyFailed, $"{m_rowsCopied} row{(m_rowsCopied == 1 ? " was" : "s were")} copied to {tableName} but only {rowsInserted} {(rowsInserted == 1 ? "was" : "were")} inserted.");
 		}
 
 		return new(errors, rowsInserted);
@@ -403,7 +411,7 @@ public sealed class SingleStoreBulkCopy
 
 					var inputIndex = 0;
 					var bytesWritten = 0;
-					while (outputIndex >= maxLength || !WriteValue(m_connection, values[valueIndex], ref inputIndex, ref utf8Encoder, buffer.AsSpan(0, maxLength).Slice(outputIndex), out bytesWritten))
+					while (outputIndex >= maxLength || !WriteValue(m_connection, values[valueIndex], ref inputIndex, ref utf8Encoder, buffer.AsSpan(0, maxLength)[outputIndex..], out bytesWritten))
 					{
 						var payload = new PayloadData(new ArraySegment<byte>(buffer, 0, outputIndex + bytesWritten));
 						await m_connection.Session.SendReplyAsync(payload, ioBehavior, cancellationToken).ConfigureAwait(false);
@@ -424,7 +432,7 @@ public sealed class SingleStoreBulkCopy
 				}
 			}
 
-			if (outputIndex != 0 && !(eventArgs?.Abort ?? false))
+			if (outputIndex != 0 && eventArgs?.Abort is not true)
 			{
 				var payload2 = new PayloadData(new ArraySegment<byte>(buffer, 0, outputIndex));
 				await m_connection.Session.SendReplyAsync(payload2, ioBehavior, cancellationToken).ConfigureAwait(false);
@@ -433,7 +441,7 @@ public sealed class SingleStoreBulkCopy
 		finally
 		{
 			ArrayPool<byte>.Shared.Return(buffer);
-			m_wasAborted = eventArgs?.Abort ?? false;
+			m_wasAborted = eventArgs?.Abort is true;
 		}
 
 		static bool WriteValue(SingleStoreConnection connection, object value, ref int inputIndex, ref Encoder? utf8Encoder, Span<byte> output, out int bytesWritten)
@@ -446,7 +454,7 @@ public sealed class SingleStoreBulkCopy
 
 			if (value is null || value == DBNull.Value)
 			{
-				ReadOnlySpan<byte> escapedNull = new byte[] { 0x5C, 0x4E };
+				ReadOnlySpan<byte> escapedNull = @"\N"u8; // a field value of \N is read as NULL for input
 				if (output.Length < escapedNull.Length)
 				{
 					bytesWritten = 0;
@@ -534,15 +542,20 @@ public sealed class SingleStoreBulkCopy
 				bytesWritten = 1;
 				return true;
 			}
-			else if (value is float or double)
+			else if (value is float floatValue)
 			{
 				// NOTE: Utf8Formatter doesn't support "R"
-				return WriteString("{0:R}".FormatInvariant(value), ref utf8Encoder, output, out bytesWritten);
+				return WriteString(floatValue.ToString("R", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
+			}
+			else if (value is double doubleValue)
+			{
+				// NOTE: Utf8Formatter doesn't support "R"
+				return WriteString(doubleValue.ToString("R", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
 			}
 			else if (value is SingleStoreDateTime mySqlDateTimeValue)
 			{
 				if (mySqlDateTimeValue.IsValidDateTime)
-					return WriteString("{0:yyyy'-'MM'-'dd' 'HH':'mm':'ss'.'ffffff}".FormatInvariant(mySqlDateTimeValue.GetDateTime()), ref utf8Encoder, output, out bytesWritten);
+					return WriteString(mySqlDateTimeValue.GetDateTime().ToString("yyyy'-'MM'-'dd' 'HH':'mm':'ss'.'ffffff", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
 				else
 					return WriteString("0000-00-00", ref utf8Encoder, output, out bytesWritten);
 			}
@@ -553,13 +566,23 @@ public sealed class SingleStoreBulkCopy
 				else if (connection.DateTimeKind == DateTimeKind.Local && dateTimeValue.Kind == DateTimeKind.Utc)
 					throw new SingleStoreException("DateTime.Kind must not be Utc when DateTimeKind setting is Local");
 
-				return WriteString("{0:yyyy'-'MM'-'dd' 'HH':'mm':'ss'.'ffffff}".FormatInvariant(dateTimeValue), ref utf8Encoder, output, out bytesWritten);
+				return WriteString(dateTimeValue.ToString("yyyy'-'MM'-'dd' 'HH':'mm':'ss'.'ffffff", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
 			}
 			else if (value is DateTimeOffset dateTimeOffsetValue)
 			{
 				// store as UTC as it will be read as such when deserialized from a timespan column
-				return WriteString("{0:yyyy'-'MM'-'dd' 'HH':'mm':'ss'.'ffffff}".FormatInvariant(dateTimeOffsetValue.UtcDateTime), ref utf8Encoder, output, out bytesWritten);
+				return WriteString(dateTimeOffsetValue.UtcDateTime.ToString("yyyy'-'MM'-'dd' 'HH':'mm':'ss'.'ffffff", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
 			}
+#if NET6_0_OR_GREATER
+			else if (value is DateOnly dateOnlyValue)
+			{
+				return WriteString(dateOnlyValue.ToString("yyyy'-'MM'-'dd", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
+			}
+			else if (value is TimeOnly timeOnlyValue)
+			{
+				return WriteString(timeOnlyValue.ToString("HH':'mm':'ss'.'ffffff", CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
+			}
+#endif
 			else if (value is TimeSpan ts)
 			{
 				var isNegative = false;
@@ -568,7 +591,12 @@ public sealed class SingleStoreBulkCopy
 					isNegative = true;
 					ts = TimeSpan.FromTicks(-ts.Ticks);
 				}
-				return WriteString("{0}{1}:{2:mm':'ss'.'ffffff}'".FormatInvariant(isNegative ? "-" : "", ts.Days * 24 + ts.Hours, ts), ref utf8Encoder, output, out bytesWritten);
+#if NET6_0_OR_GREATER
+				var str = string.Create(CultureInfo.InvariantCulture, $"{(isNegative ? "-" : "")}{ts.Days * 24 + ts.Hours}:{ts:mm':'ss'.'ffffff}");
+#else
+				var str = FormattableString.Invariant($"{(isNegative ? "-" : "")}{ts.Days * 24 + ts.Hours}:{ts:mm':'ss'.'ffffff}");
+#endif
+				return WriteString(str, ref utf8Encoder, output, out bytesWritten);
 			}
 			else if (value is Guid guidValue)
 			{
@@ -600,13 +628,21 @@ public sealed class SingleStoreBulkCopy
 					return Utf8Formatter.TryFormat(guidValue, output, out bytesWritten, is32Characters ? 'N' : 'D');
 				}
 			}
-			else if (value is Enum)
+			else if (value is Enum enumValue)
 			{
-				return WriteString("{0:d}".FormatInvariant(value), ref utf8Encoder, output, out bytesWritten);
+				return WriteString(enumValue.ToString("d"), ref utf8Encoder, output, out bytesWritten);
+			}
+			else if (value is BigInteger bigInteger)
+			{
+				return WriteString(bigInteger.ToString(CultureInfo.InvariantCulture), ref utf8Encoder, output, out bytesWritten);
+			}
+			else if (value is SingleStoreDecimal mySqlDecimal)
+			{
+				return WriteString(mySqlDecimal.ToString(), ref utf8Encoder, output, out bytesWritten);
 			}
 			else
 			{
-				throw new NotSupportedException("Type {0} not currently supported. Value: {1}".FormatInvariant(value.GetType().Name, value));
+				throw new NotSupportedException($"Type {value.GetType().Name} not currently supported. Value: {value}");
 			}
 		}
 
@@ -633,7 +669,7 @@ public sealed class SingleStoreBulkCopy
 
 					output[0] = (byte) '\\';
 					output[1] = (byte) value[inputIndex];
-					output = output.Slice(2);
+					output = output[2..];
 					bytesWritten += 2;
 					inputIndex++;
 				}
@@ -649,7 +685,7 @@ public sealed class SingleStoreBulkCopy
 					utf8Encoder.Convert(value.AsSpan(inputIndex, nextIndex - inputIndex), output, nextIndex == value.Length, out var charsUsed, out var bytesUsed, out var completed);
 
 					bytesWritten += bytesUsed;
-					output = output.Slice(bytesUsed);
+					output = output[bytesUsed..];
 					inputIndex += charsUsed;
 
 					if (!completed)
@@ -662,14 +698,14 @@ public sealed class SingleStoreBulkCopy
 
 		static bool WriteBytes(ReadOnlySpan<byte> value, ref int inputIndex, Span<byte> output, out int bytesWritten)
 		{
-			ReadOnlySpan<byte> hex = new byte[] { (byte) '0', (byte) '1', (byte) '2', (byte) '3', (byte) '4', (byte) '5', (byte) '6', (byte) '7', (byte) '8', (byte) '9', (byte) 'A', (byte) 'B', (byte) 'C', (byte) 'D', (byte) 'E', (byte) 'F' };
+			ReadOnlySpan<byte> hex = "0123456789ABCDEF"u8;
 			bytesWritten = 0;
 			for (; inputIndex < value.Length && output.Length > 2; inputIndex++)
 			{
 				var by = value[inputIndex];
 				output[0] = hex[(by >> 4) & 0xF];
 				output[1] = hex[by & 0xF];
-				output = output.Slice(2);
+				output = output[2..];
 				bytesWritten += 2;
 			}
 
@@ -681,9 +717,9 @@ public sealed class SingleStoreBulkCopy
 	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleStoreBulkCopy));
 	private static readonly Encoding s_utf8Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
-	readonly SingleStoreConnection m_connection;
-	readonly SingleStoreTransaction? m_transaction;
-	int m_rowsCopied;
-	IValuesEnumerator? m_valuesEnumerator;
-	bool m_wasAborted;
+	private readonly SingleStoreConnection m_connection;
+	private readonly SingleStoreTransaction? m_transaction;
+	private int m_rowsCopied;
+	private IValuesEnumerator? m_valuesEnumerator;
+	private bool m_wasAborted;
 }

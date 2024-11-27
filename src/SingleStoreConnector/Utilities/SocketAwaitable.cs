@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 
 namespace SingleStoreConnector.Utilities;
 
-// See http://blogs.msdn.com/b/pfxteam/archive/2011/12/15/10248293.aspx
+// See https://devblogs.microsoft.com/pfxteam/awaiting-socket-operations/
 internal sealed class SocketAwaitable : INotifyCompletion
 {
 	public SocketAwaitable(SocketAsyncEventArgs eventArgs)
@@ -37,8 +37,8 @@ internal sealed class SocketAwaitable : INotifyCompletion
 		m_continuation = null;
 	}
 
-	static readonly Action s_sentinel = () => { };
+	private static readonly Action s_sentinel = () => { };
 
-	Action? m_continuation;
+	private Action? m_continuation;
 }
 #endif

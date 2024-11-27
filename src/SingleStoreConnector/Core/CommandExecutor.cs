@@ -42,20 +42,22 @@ internal static class CommandExecutor
 
 			var writer = new ByteBufferWriter();
 			//// cachedProcedures will be non-null if there is a stored procedure, which is also the only time it will be read
-			if (!payloadCreator.WriteQueryCommand(ref commandListPosition, cachedProcedures!, writer))
+			if (!payloadCreator.WriteQueryCommand(ref commandListPosition, cachedProcedures!, writer, false))
 				throw new InvalidOperationException("ICommandPayloadCreator failed to write query payload");
 
 			cancellationToken.ThrowIfCancellationRequested();
 
 			using var payload = writer.ToPayloadData();
 			connection.Session.StartQuerying(command.CancellableCommand);
-			command.SetLastInsertedId(-1);
+			command.SetLastInsertedId(0);
 			try
 			{
 				await connection.Session.SendAsync(payload, ioBehavior, CancellationToken.None).ConfigureAwait(false);
-				return await SingleStoreDataReader.CreateAsync(commandListPosition, payloadCreator, cachedProcedures, command, behavior, activity, ioBehavior, cancellationToken).ConfigureAwait(false);
+				return await SingleStoreDataReader.CreateAsync(commandListPosition, payloadCreator, cachedProcedures,
+					command, behavior, activity, ioBehavior, cancellationToken).ConfigureAwait(false);
 			}
-			catch (SingleStoreException ex) when (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted && cancellationToken.IsCancellationRequested)
+			catch (SingleStoreException ex) when (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted &&
+			                                      cancellationToken.IsCancellationRequested)
 			{
 				Log.Info("Session{0} query was interrupted", connection.Session.Id);
 				throw new OperationCanceledException(ex.Message, ex, cancellationToken);
@@ -65,7 +67,12 @@ internal static class CommandExecutor
 				// the default MySQL Server value for max_allowed_packet (in MySQL 5.7) is 4MiB: https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_max_allowed_packet
 				// use "decimal megabytes" (to round up) when creating the exception message
 				int megabytes = payload.Span.Length / 1_000_000;
-				throw new SingleStoreException("Error submitting {0}MB packet; ensure 'max_allowed_packet' is greater than {0}MB.".FormatInvariant(megabytes), ex);
+				throw new SingleStoreException($"Error submitting {megabytes}MB packet; ensure 'max_allowed_packet' is greater than {megabytes}MB.", ex);
+			}
+			catch (SingleStoreException ex) when (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted)
+			{
+				Log.Trace("Session{0} got QueryInterrupted exception, but not because of the CommandTimeout or CancellationToken (CommandExecutor.cs)", connection.Session.Id);
+				throw;
 			}
 		}
 		catch (Exception ex) when (activity is { IsAllDataRequested: true })
@@ -76,5 +83,5 @@ internal static class CommandExecutor
 		}
 	}
 
-	static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(CommandExecutor));
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(CommandExecutor));
 }

@@ -1,12 +1,12 @@
 // Supports using nullable attributes on older frameworks.
 // Copied from https://github.com/dotnet/corefx/blob/master/src/Common/src/CoreLib/System/Diagnostics/CodeAnalysis/NullableAttributes.cs
 
-#if NET45 || NET461 || NET471 || NETSTANDARD2_0 || NETCOREAPP2_1
+#if NET461 || NET471 || NETSTANDARD2_0 || NETCOREAPP2_1
 namespace System.Diagnostics.CodeAnalysis;
 
 /// <summary>Specifies that null is allowed as an input even if the corresponding type disallows it.</summary>
 [AttributeUsage(AttributeTargets.Field | AttributeTargets.Parameter | AttributeTargets.Property, Inherited = false)]
-sealed class AllowNullAttribute : Attribute
+internal sealed class AllowNullAttribute : Attribute
 {
 }
 

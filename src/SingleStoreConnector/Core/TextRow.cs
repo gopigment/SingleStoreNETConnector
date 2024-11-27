@@ -60,9 +60,9 @@ internal sealed class TextRow : Row
 			var columnLen = columnDefinition.ColumnLength /
 			                ProtocolUtility.GetBytesPerCharacter(columnDefinition.CharacterSet);
 			if (Connection.GuidFormat == SingleStoreGuidFormat.Char36 && columnLen == 36)
-				return Utf8Parser.TryParse(data, out Guid guid, out int guid36BytesConsumed, 'D') && guid36BytesConsumed == 36 ? guid : throw new FormatException();
+				return Utf8Parser.TryParse(data, out Guid guid, out int guid36BytesConsumed, 'D') && guid36BytesConsumed == 36 ? guid : throw new FormatException($"Could not parse CHAR(36) value as Guid: {Encoding.UTF8.GetString(data)}");
 			if (Connection.GuidFormat == SingleStoreGuidFormat.Char32 && columnLen == 32)
-				return Utf8Parser.TryParse(data, out Guid guid, out int guid32BytesConsumed, 'N') && guid32BytesConsumed == 32 ? guid : throw new FormatException();
+				return Utf8Parser.TryParse(data, out Guid guid, out int guid32BytesConsumed, 'N') && guid32BytesConsumed == 32 ? guid : throw new FormatException($"Could not parse CHAR(32) value as Guid: {Encoding.UTF8.GetString(data)}");
 			if (Connection.TreatChar48AsGeographyPoint && columnLen == 48)
 				goto case ColumnType.GeographyPoint;
 			if (columnLen == 1431655765)
@@ -106,10 +106,28 @@ internal sealed class TextRow : Row
 			return ParseInt32(data);
 
 		case ColumnType.Float:
-			return !Utf8Parser.TryParse(data, out float floatValue, out var floatBytesConsumed) || floatBytesConsumed != data.Length ? throw new FormatException() : floatValue;
+			if (Utf8Parser.TryParse(data, out float floatValue, out var floatBytesConsumed) && floatBytesConsumed == data.Length)
+				return floatValue;
+			ReadOnlySpan<byte> floatInfinity = "-inf"u8;
+			if (data.SequenceEqual(floatInfinity))
+				return float.NegativeInfinity;
+			if (data.SequenceEqual(floatInfinity.Slice(1)))
+				return float.PositiveInfinity;
+			if (data.SequenceEqual("nan"u8))
+				return float.NaN;
+			throw new FormatException($"Couldn't parse value as float: {Encoding.UTF8.GetString(data)}");
 
 		case ColumnType.Double:
-			return !Utf8Parser.TryParse(data, out double doubleValue, out var doubleBytesConsumed) || doubleBytesConsumed != data.Length ? throw new FormatException() : doubleValue;
+			if (Utf8Parser.TryParse(data, out double doubleValue, out var doubleBytesConsumed) && doubleBytesConsumed == data.Length)
+				return doubleValue;
+			ReadOnlySpan<byte> doubleInfinity = "-inf"u8;
+			if (data.SequenceEqual(doubleInfinity))
+				return double.NegativeInfinity;
+			if (data.SequenceEqual(doubleInfinity.Slice(1)))
+				return double.PositiveInfinity;
+			if (data.SequenceEqual("nan"u8))
+				return float.NaN;
+			throw new FormatException($"Couldn't parse value as double: {Encoding.UTF8.GetString(data)}");
 
 		case ColumnType.Decimal:
 		case ColumnType.NewDecimal:
@@ -119,7 +137,7 @@ internal sealed class TextRow : Row
 		case ColumnType.Geography:
 			return Encoding.UTF8.GetString(data);
 		default:
-			throw new NotImplementedException("Reading {0} not implemented".FormatInvariant(columnDefinition.ColumnType));
+			throw new NotImplementedException($"Reading {columnDefinition.ColumnType} not implemented");
 		}
 	}
 

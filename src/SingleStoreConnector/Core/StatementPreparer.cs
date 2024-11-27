@@ -23,7 +23,11 @@ internal sealed class StatementPreparer
 		var parser = new PreparedCommandSqlParser(this, statements, statementStartEndIndexes, writer);
 		parser.Parse(m_commandText);
 		for (var i = 0; i < statements.Count; i++)
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP3_1_OR_GREATER
+			statements[i].StatementBytes = writer.ArraySegment[statementStartEndIndexes[i * 2]..statementStartEndIndexes[i * 2 + 1]];
+#else
 			statements[i].StatementBytes = writer.ArraySegment.Slice(statementStartEndIndexes[i * 2], statementStartEndIndexes[i * 2 + 1] - statementStartEndIndexes[i * 2]);
+#endif
 		return new ParsedStatements(statements, writer.ToPayloadData());
 	}
 
@@ -42,17 +46,17 @@ internal sealed class StatementPreparer
 	{
 		var index = m_parameters?.NormalizedIndexOf(name) ?? -1;
 		if (index == -1 && (Options & StatementPreparerOptions.AllowUserVariables) == 0)
-			throw new SingleStoreException("Parameter '{0}' must be defined. To use this as a variable, set 'Allow User Variables=true' in the connection string.".FormatInvariant(name));
+			throw new SingleStoreException($"Parameter '{name}' must be defined. To use this as a variable, set 'Allow User Variables=true' in the connection string.");
 		return index;
 	}
 
 	private SingleStoreParameter GetInputParameter(int index)
 	{
 		if (index >= (m_parameters?.Count ?? 0))
-			throw new SingleStoreException("Parameter index {0} is invalid when only {1} parameter{2} defined.".FormatInvariant(index, m_parameters?.Count ?? 0, m_parameters?.Count == 1 ? " is" : "s are"));
+			throw new SingleStoreException($"Parameter index {index} is invalid when only {m_parameters?.Count ?? 0} parameter{(m_parameters?.Count == 1 ? " is" : "s are")} defined.");
 		var parameter = m_parameters![index];
 		if (parameter.Direction != ParameterDirection.Input && (Options & StatementPreparerOptions.AllowOutputParameters) == 0)
-			throw new SingleStoreException("Only ParameterDirection.Input is supported when CommandType is Text (parameter name: {0})".FormatInvariant(parameter.ParameterName));
+			throw new SingleStoreException($"Only ParameterDirection.Input is supported when CommandType is Text (parameter name: {parameter.ParameterName})");
 		return parameter;
 	}
 
@@ -92,14 +96,14 @@ internal sealed class StatementPreparer
 			m_writer.Write(Preparer.m_commandText, m_lastIndex, Preparer.m_commandText.Length - m_lastIndex);
 			if ((states & FinalParseStates.NeedsNewline) == FinalParseStates.NeedsNewline)
 				m_writer.Write((byte) '\n');
-			if ((states & FinalParseStates.NeedsSemicolon) == FinalParseStates.NeedsSemicolon)
+			if ((states & FinalParseStates.NeedsSemicolon) == FinalParseStates.NeedsSemicolon && (Preparer.Options & StatementPreparerOptions.AppendSemicolon) == StatementPreparerOptions.AppendSemicolon)
 				m_writer.Write((byte) ';');
 			IsComplete = (states & FinalParseStates.Complete) == FinalParseStates.Complete;
 		}
 
-		readonly ByteBufferWriter m_writer;
-		int m_currentParameterIndex;
-		int m_lastIndex;
+		private readonly ByteBufferWriter m_writer;
+		private int m_currentParameterIndex;
+		private int m_lastIndex;
 	}
 
 	private sealed class PreparedCommandSqlParser : SqlParser
@@ -143,6 +147,7 @@ internal sealed class StatementPreparer
 
 			// store the parameter index
 			m_statements[m_statements.Count - 1].ParameterNames.Add(parameterName);
+			m_statements[m_statements.Count - 1].NormalizedParameterNames.Add(parameterName == null ? null : SingleStoreParameter.NormalizeParameterName(parameterName));
 			m_statements[m_statements.Count - 1].ParameterIndexes.Add(parameterIndex);
 		}
 
@@ -153,13 +158,13 @@ internal sealed class StatementPreparer
 			m_statementStartEndIndexes.Add(m_writer.Position);
 		}
 
-		readonly List<ParsedStatement> m_statements;
-		readonly List<int> m_statementStartEndIndexes;
-		readonly ByteBufferWriter m_writer;
-		int m_currentParameterIndex;
-		int m_lastIndex;
+		private readonly List<ParsedStatement> m_statements;
+		private readonly List<int> m_statementStartEndIndexes;
+		private readonly ByteBufferWriter m_writer;
+		private int m_currentParameterIndex;
+		private int m_lastIndex;
 	}
 
-	readonly string m_commandText;
-	readonly SingleStoreParameterCollection? m_parameters;
+	private readonly string m_commandText;
+	private readonly SingleStoreParameterCollection? m_parameters;
 }

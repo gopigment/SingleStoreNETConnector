@@ -20,6 +20,8 @@ using SingleStoreConnector.Utilities;
 
 namespace SingleStoreConnector.Core;
 
+#pragma warning disable CA1001 // Types that own disposable fields should be disposable
+
 internal sealed class ServerSession
 {
 	public ServerSession()
@@ -38,11 +40,8 @@ internal sealed class ServerSession
 		Pool = pool;
 		PoolGeneration = poolGeneration;
 		HostName = "";
-		m_logArguments = new object?[] { "{0}".FormatInvariant(Id), null };
-		m_activityTags = new ActivityTagsCollection
-		{
-			{ ActivitySourceHelper.DatabaseSystemTagName, ActivitySourceHelper.DatabaseSystemValue },
-		};
+		m_logArguments = new object?[] { Id.ToString(CultureInfo.InvariantCulture), null };
+		m_activityTags = new ActivityTagsCollection();
 		Log.Trace("Session{0} created new session", m_logArguments);
 	}
 
@@ -54,6 +53,7 @@ internal sealed class ServerSession
 	// SingleStore Server version
 	public ServerVersion S2ServerVersion { get; set; }
 
+	public int AggregatorId { get; private set; }
 	public int ActiveCommandId { get; private set; }
 	public int CancellationTimeout { get; private set; }
 	public int ConnectionId { get; set; }
@@ -64,7 +64,8 @@ internal sealed class ServerSession
 	public uint LastReturnedTicks { get; private set; }
 	public string? DatabaseOverride { get; set; }
 	public string HostName { get; private set; }
-	public IPAddress? IPAddress => (m_tcpClient?.Client.RemoteEndPoint as IPEndPoint)?.Address;
+	public IPEndPoint? IPEndPoint => m_tcpClient?.Client.RemoteEndPoint as IPEndPoint;
+	public string? UserID { get; private set; }
 	public WeakReference<SingleStoreConnection>? OwningConnection { get; set; }
 	public bool SupportsComMulti => m_supportsComMulti;
 	public bool SupportsDeprecateEof => m_supportsDeprecateEof;
@@ -73,11 +74,7 @@ internal sealed class ServerSession
 	public bool ProcAccessDenied { get; set; }
 	public ICollection<KeyValuePair<string, object?>> ActivityTags => m_activityTags;
 
-#if NETCOREAPP2_1_OR_GREATER || NETSTANDARD2_1_OR_GREATER
 	public ValueTask ReturnToPoolAsync(IOBehavior ioBehavior, SingleStoreConnection? owningConnection)
-#else
-	public ValueTask<int> ReturnToPoolAsync(IOBehavior ioBehavior, SingleStoreConnection? owningConnection)
-#endif
 	{
 		if (Log.IsTraceEnabled())
 		{
@@ -103,7 +100,7 @@ internal sealed class ServerSession
 		{
 			if (ActiveCommandId != command.CommandId)
 				return false;
-			VerifyState(State.Querying, State.CancelingQuery, State.Failed);
+			VerifyState(State.Querying, State.CancelingQuery, State.Closing, State.Closed, State.Failed);
 			if (m_state != State.Querying)
 				return false;
 			if (command.CancelAttemptCount++ >= 10)
@@ -161,7 +158,7 @@ internal sealed class ServerSession
 			if (cachedProcedure is null)
 			{
 				var name = NormalizedSchema.MustNormalize(command.CommandText!, command.Connection.Database);
-				throw new SingleStoreException("Procedure or function '{0}' cannot be found in database '{1}'.".FormatInvariant(name.Component, name.Schema));
+				throw new SingleStoreException($"Procedure or function '{name.Component}' cannot be found in database '{name.Schema}'.");
 			}
 
 			var parameterCount = cachedProcedure.Parameters.Count;
@@ -173,20 +170,20 @@ internal sealed class ServerSession
 				buffer[2] = 'L';
 				buffer[3] = 'L';
 				buffer[4] = ' ';
-				buffer = buffer.Slice(5);
+				buffer = buffer[5..];
 				state.commandText.AsSpan().CopyTo(buffer);
-				buffer = buffer.Slice(state.commandText.Length);
+				buffer = buffer[state.commandText.Length..];
 				buffer[0] = '(';
-				buffer = buffer.Slice(1);
+				buffer = buffer[1..];
 				if (state.parameterCount > 0)
 				{
 					buffer[0] = '?';
-					buffer = buffer.Slice(1);
+					buffer = buffer[1..];
 					for (var i = 1; i < state.parameterCount; i++)
 					{
 						buffer[0] = ',';
 						buffer[1] = '?';
-						buffer = buffer.Slice(2);
+						buffer = buffer[2..];
 					}
 				}
 				buffer[0] = ')';
@@ -243,7 +240,7 @@ internal sealed class ServerSession
 					payload = await ReceiveReplyAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 					var payloadLength = payload.Span.Length;
 					Utility.Resize(ref columnsAndParameters, columnsAndParametersSize + payloadLength);
-					payload.Span.CopyTo(columnsAndParameters.Array.AsSpan().Slice(columnsAndParametersSize));
+					payload.Span.CopyTo(columnsAndParameters.AsSpan(columnsAndParametersSize));
 					parameters[i] = ColumnDefinitionPayload.Create(new(columnsAndParameters, columnsAndParametersSize, payloadLength));
 					columnsAndParametersSize += payloadLength;
 				}
@@ -263,7 +260,7 @@ internal sealed class ServerSession
 					payload = await ReceiveReplyAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 					var payloadLength = payload.Span.Length;
 					Utility.Resize(ref columnsAndParameters, columnsAndParametersSize + payloadLength);
-					payload.Span.CopyTo(columnsAndParameters.Array.AsSpan().Slice(columnsAndParametersSize));
+					payload.Span.CopyTo(columnsAndParameters.AsSpan(columnsAndParametersSize));
 					columns[i] = ColumnDefinitionPayload.Create(new(columnsAndParameters, columnsAndParametersSize, payloadLength));
 					columnsAndParametersSize += payloadLength;
 				}
@@ -307,33 +304,10 @@ internal sealed class ServerSession
 	{
 		m_logArguments[1] = m_state;
 		Log.Trace("Session{0} entering FinishQuerying; SessionState={1}", m_logArguments);
-		bool clearConnection = false;
-		lock (m_lock)
-		{
-			if (m_state == State.CancelingQuery)
-			{
-				m_state = State.ClearingPendingCancellation;
-				clearConnection = true;
-			}
-		}
-
-		if (clearConnection)
-		{
-			// KILL QUERY will kill a subsequent query if the command it was intended to cancel has already completed.
-			// In order to handle this case, we issue a dummy query that will consume the pending cancellation.
-			// See https://bugs.mysql.com/bug.php?id=45679
-			Log.Debug("Session{0} sending 'SELECT SLEEP(0) INTO @dummy' command to clear pending cancellation", m_logArguments);
-			var payload = QueryPayload.Create(SupportsQueryAttributes, "SELECT SLEEP(0) INTO @dummy;");
-#pragma warning disable CA2012 // Safe because method completes synchronously
-			SendAsync(payload, IOBehavior.Synchronous, CancellationToken.None).GetAwaiter().GetResult();
-			payload = ReceiveReplyAsync(IOBehavior.Synchronous, CancellationToken.None).GetAwaiter().GetResult();
-#pragma warning restore CA2012
-			OkPayload.Create(payload.Span, SupportsDeprecateEof, SupportsSessionTrack);
-		}
 
 		lock (m_lock)
 		{
-			if (m_state is State.Querying or State.ClearingPendingCancellation)
+			if (m_state is State.Querying or State.CancelingQuery)
 				m_state = State.Connected;
 			else
 				VerifyState(State.Failed);
@@ -399,7 +373,7 @@ internal sealed class ServerSession
 			m_state = State.Closed;
 	}
 
-	public async Task<string?> ConnectAsync(ConnectionSettings cs, SingleStoreConnection connection, int startTickCount, ILoadBalancer? loadBalancer, IOBehavior ioBehavior, CancellationToken cancellationToken)
+	public async Task<string?> ConnectAsync(ConnectionSettings cs, SingleStoreConnection connection, int startTickCount, ILoadBalancer? loadBalancer, Activity? activity, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		string? statusInfo = null;
 
@@ -410,6 +384,25 @@ internal sealed class ServerSession
 				VerifyState(State.Created);
 				m_state = State.Connecting;
 			}
+			UserID = cs.UserID;
+
+			// set activity tags
+			{
+				var connectionString = cs.ConnectionStringBuilder.GetConnectionString(cs.ConnectionStringBuilder.PersistSecurityInfo);
+				m_activityTags.Add(ActivitySourceHelper.DatabaseSystemTagName, ActivitySourceHelper.DatabaseSystemValue);
+				m_activityTags.Add(ActivitySourceHelper.DatabaseConnectionStringTagName, connectionString);
+				m_activityTags.Add(ActivitySourceHelper.DatabaseUserTagName, cs.UserID);
+				if (cs.Database.Length != 0)
+					m_activityTags.Add(ActivitySourceHelper.DatabaseNameTagName, cs.Database);
+				if (activity is { IsAllDataRequested: true })
+				{
+					activity.SetTag(ActivitySourceHelper.DatabaseSystemTagName, ActivitySourceHelper.DatabaseSystemValue);
+					activity.SetTag(ActivitySourceHelper.DatabaseConnectionStringTagName, connectionString);
+					activity.SetTag(ActivitySourceHelper.DatabaseUserTagName, cs.UserID);
+					if (cs.Database.Length != 0)
+						activity.SetTag(ActivitySourceHelper.DatabaseNameTagName, cs.Database);
+				}
+			}
 
 			// TLS negotiation should automatically fall back to the best version supported by client and server. However,
 			// Windows Schannel clients will fail to connect to a yaSSL-based MySQL Server if TLS 1.2 is requested and
@@ -418,20 +411,23 @@ internal sealed class ServerSession
 			// (which is SslProtocols.None; see https://docs.microsoft.com/en-us/dotnet/framework/network-programming/tls),
 			// then fall back to SslProtocols.Tls11 if that fails and it's possible that the cause is a yaSSL server.
 			bool shouldRetrySsl;
+			var shouldUpdatePoolSslProtocols = false;
 			var sslProtocols = Pool?.SslProtocols ?? cs.TlsVersions;
 			PayloadData payload;
 			InitialHandshakePayload initialHandshake;
 			do
 			{
-				shouldRetrySsl = (sslProtocols == SslProtocols.None || (sslProtocols & SslProtocols.Tls12) == SslProtocols.Tls12) && Utility.IsWindows();
+				var isTls11or10Supported = (sslProtocols & (SslProtocols.Tls | SslProtocols.Tls11)) != SslProtocols.None;
+				var isTls12Supported = (sslProtocols & SslProtocols.Tls12) == SslProtocols.Tls12;
+				shouldRetrySsl = (sslProtocols == SslProtocols.None || (isTls12Supported && isTls11or10Supported)) && Utility.IsWindows();
 
 				var connected = false;
 				if (cs.ConnectionProtocol == SingleStoreConnectionProtocol.Sockets)
-					connected = await OpenTcpSocketAsync(cs, loadBalancer ?? throw new ArgumentNullException(nameof(loadBalancer)), ioBehavior, cancellationToken).ConfigureAwait(false);
+					connected = await OpenTcpSocketAsync(cs, loadBalancer ?? throw new ArgumentNullException(nameof(loadBalancer)), activity, ioBehavior, cancellationToken).ConfigureAwait(false);
 				else if (cs.ConnectionProtocol == SingleStoreConnectionProtocol.UnixSocket)
-					connected = await OpenUnixSocketAsync(cs, ioBehavior, cancellationToken).ConfigureAwait(false);
+					connected = await OpenUnixSocketAsync(cs, activity, ioBehavior, cancellationToken).ConfigureAwait(false);
 				else if (cs.ConnectionProtocol == SingleStoreConnectionProtocol.NamedPipe)
-					connected = await OpenNamedPipeAsync(cs, startTickCount, ioBehavior, cancellationToken).ConfigureAwait(false);
+					connected = await OpenNamedPipeAsync(cs, startTickCount, activity, ioBehavior, cancellationToken).ConfigureAwait(false);
 				if (!connected)
 				{
 					lock (m_lock)
@@ -459,7 +455,7 @@ internal sealed class ServerSession
 				if (authPluginName != "mysql_native_password" && authPluginName != "sha256_password" && authPluginName != "caching_sha2_password")
 				{
 					Log.Error("Session{0} unsupported authentication method AuthPluginName={1}", m_logArguments);
-					throw new NotSupportedException("Authentication method '{0}' is not supported.".FormatInvariant(initialHandshake.AuthPluginName));
+					throw new NotSupportedException($"Authentication method '{initialHandshake.AuthPluginName}' is not supported.");
 				}
 
 				MySqlCompatVersion = new(initialHandshake.ServerVersion);
@@ -467,6 +463,14 @@ internal sealed class ServerSession
 				AuthPluginData = initialHandshake.AuthPluginData;
 				m_useCompression = cs.UseCompression && (initialHandshake.ProtocolCapabilities & ProtocolCapabilities.Compress) != 0;
 				CancellationTimeout = cs.CancellationTimeout;
+
+				// set activity tags
+				{
+					var connectionId = ConnectionId.ToString(CultureInfo.InvariantCulture);
+					m_activityTags[ActivitySourceHelper.DatabaseConnectionIdTagName] = connectionId;
+					if (activity is { IsAllDataRequested: true })
+						activity.SetTag(ActivitySourceHelper.DatabaseConnectionIdTagName, connectionId);
+				}
 
 				m_supportsComMulti = (initialHandshake.ProtocolCapabilities & ProtocolCapabilities.MariaDbComMulti) != 0;
 				m_supportsConnectionAttributes = (initialHandshake.ProtocolCapabilities & ProtocolCapabilities.ConnectionAttributes) != 0;
@@ -498,19 +502,20 @@ internal sealed class ServerSession
 					{
 						await InitSslAsync(initialHandshake.ProtocolCapabilities, cs, connection, sslProtocols, ioBehavior, cancellationToken).ConfigureAwait(false);
 						shouldRetrySsl = false;
+						if (shouldUpdatePoolSslProtocols && Pool is not null)
+							Pool.SslProtocols = sslProtocols;
 					}
 					catch (ArgumentException ex) when (ex.ParamName == "sslProtocolType" && sslProtocols == SslProtocols.None)
 					{
 						Log.Debug(ex, "Session{0} doesn't support SslProtocols.None; falling back to explicitly specifying SslProtocols", m_logArguments);
 						sslProtocols = SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12;
 					}
-					catch (Exception ex) when (shouldRetrySsl && ((ex is SingleStoreException && ex.InnerException is IOException) || ex is IOException))
+					catch (Exception ex) when (shouldRetrySsl && ((ex is SingleStoreException && ex.InnerException is AuthenticationException or IOException) || ex is AuthenticationException or IOException))
 					{
 						// negotiating TLS 1.2 with a yaSSL-based server throws an exception on Windows, see comment at top of method
-						Log.Debug(ex, "Session{0} failed negotiating TLS; falling back to TLS 1.1", m_logArguments);
-						sslProtocols = SslProtocols.Tls | SslProtocols.Tls11;
-						if (Pool is not null)
-							Pool.SslProtocols = sslProtocols;
+						Log.Warn(ex, "Session{0} failed negotiating TLS; falling back to TLS 1.1", m_logArguments);
+						sslProtocols = sslProtocols == SslProtocols.None ? SslProtocols.Tls | SslProtocols.Tls11 : (SslProtocols.Tls | SslProtocols.Tls11) & sslProtocols;
+						shouldUpdatePoolSslProtocols = true;
 					}
 				}
 				else
@@ -520,7 +525,7 @@ internal sealed class ServerSession
 			} while (shouldRetrySsl);
 
 			if (m_supportsConnectionAttributes && cs.ConnectionAttributes is null)
-				cs.ConnectionAttributes = CreateConnectionAttributes(cs.ApplicationName);
+				cs.ConnectionAttributes = CreateConnectionAttributes(cs.ApplicationName, cs.ConnAttrsExtra);
 
 			var password = GetPassword(cs, connection);
 			using (var handshakeResponsePayload = HandshakeResponse41Payload.Create(initialHandshake, cs, password, m_useCompression, m_characterSet, m_supportsConnectionAttributes ? cs.ConnectionAttributes : null))
@@ -547,12 +552,6 @@ internal sealed class ServerSession
 			await GetRealServerDetailsAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
 
 			m_payloadHandler.ByteHandler.RemainingTimeout = Constants.InfiniteTimeout;
-
-			m_activityTags.Add(ActivitySourceHelper.DatabaseConnectionIdTagName, ConnectionId.ToString(CultureInfo.InvariantCulture));
-			m_activityTags.Add(ActivitySourceHelper.DatabaseConnectionStringTagName, cs.ConnectionStringBuilder.GetConnectionString(cs.ConnectionStringBuilder.PersistSecurityInfo));
-			m_activityTags.Add(ActivitySourceHelper.DatabaseUserTagName, cs.UserID);
-			if (cs.Database.Length != 0)
-				m_activityTags.Add(ActivitySourceHelper.DatabaseNameTagName, cs.Database);
 		}
 		catch (ArgumentException ex)
 		{
@@ -568,7 +567,7 @@ internal sealed class ServerSession
 		return statusInfo;
 	}
 
-	public async Task ResetConnectionAsync(IOBehavior ioBehavior, CancellationToken cancellationToken = default, string targetDatabase = "")
+	public async Task ResetConnectionAsync(IOBehavior ioBehavior, string targetDatabase = "", CancellationToken cancellationToken = default)
 	{
 		if (S2ServerVersion.Version.CompareTo(S2Versions.SupportsResetConnection) < 0)
 			throw new InvalidOperationException("Resetting connection is not supported in SingleStore " + S2ServerVersion.OriginalString);
@@ -580,7 +579,8 @@ internal sealed class ServerSession
 
 		if (targetDatabase.Length > 0)
 		{
-			await SendAsync(QueryPayload.Create(SupportsQueryAttributes, string.Format("USE {0}", targetDatabase)), ioBehavior, cancellationToken).ConfigureAwait(false);
+			var useDb = "USE {0}".FormatInvariant(targetDatabase);
+			await SendAsync(QueryPayload.Create(SupportsQueryAttributes, Encoding.ASCII.GetBytes(useDb)), ioBehavior, cancellationToken).ConfigureAwait(false);
 			payload = await ReceiveReplyAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 			OkPayload.Create(payload.Span, SupportsDeprecateEof, SupportsSessionTrack);
 		}
@@ -602,7 +602,7 @@ internal sealed class ServerSession
 				m_logArguments[1] = S2ServerVersion.OriginalString;
 
 				Log.Trace("Session{0} ServerVersion={1} supports reset connection; sending reset connection request", m_logArguments);
-				await ResetConnectionAsync(ioBehavior, cancellationToken, connection.Database);
+				await ResetConnectionAsync(ioBehavior, connection.Database, cancellationToken).ConfigureAwait(false);
 			}
 			else
 			{
@@ -681,7 +681,7 @@ internal sealed class ServerSession
 			if (!m_isSecureConnection)
 			{
 				Log.Error("Session{0} needs a secure connection to use AuthenticationMethod '{1}'", m_logArguments);
-				throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, "Authentication method '{0}' requires a secure connection.".FormatInvariant(switchRequest.Name));
+				throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, $"Authentication method '{switchRequest.Name}' requires a secure connection.");
 			}
 
 			// send the password as a NULL-terminated UTF-8 string
@@ -710,13 +710,8 @@ internal sealed class ServerSession
 		case "sha256_password":
 			if (!m_isSecureConnection && password.Length != 0)
 			{
-#if NET45
-				Log.Error("Session{0} can't use AuthenticationMethod '{1}' without secure connection on .NET 4.5", m_logArguments);
-				throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, "Authentication method '{0}' requires a secure connection (prior to .NET 4.6).".FormatInvariant(switchRequest.Name));
-#else
 				var publicKey = await GetRsaPublicKeyAsync(switchRequest.Name, cs, ioBehavior, cancellationToken).ConfigureAwait(false);
 				return await SendEncryptedPasswordAsync(switchRequest, publicKey, password, ioBehavior, cancellationToken).ConfigureAwait(false);
-#endif
 			}
 			else
 			{
@@ -739,7 +734,7 @@ internal sealed class ServerSession
 
 		default:
 			Log.Error("Session{0} is requesting AuthenticationMethod '{1}' which is not supported", m_logArguments);
-			throw new NotSupportedException("Authentication method '{0}' is not supported.".FormatInvariant(switchRequest.Name));
+			throw new NotSupportedException($"Authentication method '{switchRequest.Name}' is not supported.");
 		}
 	}
 
@@ -755,7 +750,6 @@ internal sealed class ServerSession
 		return await ReceiveReplyAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 	}
 
-#if !NET45
 	private async Task<PayloadData> SendEncryptedPasswordAsync(
 		AuthenticationMethodSwitchRequestPayload switchRequest,
 		string rsaPublicKey,
@@ -806,9 +800,7 @@ internal sealed class ServerSession
 		await SendReplyAsync(payload, ioBehavior, cancellationToken).ConfigureAwait(false);
 		return await ReceiveReplyAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 	}
-#endif
 
-#if !NET45
 	private async Task<string> GetRsaPublicKeyAsync(string switchRequestName, ConnectionSettings cs, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		if (cs.ServerRsaPublicKeyFile.Length != 0)
@@ -821,7 +813,7 @@ internal sealed class ServerSession
 			{
 				m_logArguments[1] = cs.ServerRsaPublicKeyFile;
 				Log.Error(ex, "Session{0} couldn't load server's RSA public key from PublicKeyFile '{1}'", m_logArguments);
-				throw new SingleStoreException("Couldn't load server's RSA public key from '{0}'".FormatInvariant(cs.ServerRsaPublicKeyFile), ex);
+				throw new SingleStoreException($"Couldn't load server's RSA public key from '{cs.ServerRsaPublicKeyFile}'", ex);
 			}
 		}
 
@@ -837,9 +829,8 @@ internal sealed class ServerSession
 
 		m_logArguments[1] = switchRequestName;
 		Log.Error("Session{0} couldn't use AuthenticationMethod '{1}' because RSA key wasn't specified or couldn't be retrieved", m_logArguments);
-		throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, "Authentication method '{0}' failed. Either use a secure connection, specify the server's RSA public key with ServerRSAPublicKeyFile, or set AllowPublicKeyRetrieval=True.".FormatInvariant(switchRequestName));
+		throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, $"Authentication method '{switchRequestName}' failed. Either use a secure connection, specify the server's RSA public key with ServerRSAPublicKeyFile, or set AllowPublicKeyRetrieval=True.");
 	}
-#endif
 
 	public async ValueTask<bool> TryPingAsync(bool logInfo, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
@@ -876,7 +867,7 @@ internal sealed class ServerSession
 	}
 
 	// Starts a new conversation with the server by sending the first packet.
-	public ValueTask<int> SendAsync(PayloadData payload, IOBehavior ioBehavior, CancellationToken cancellationToken)
+	public ValueTask SendAsync(PayloadData payload, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		m_payloadHandler!.StartNewConversation();
 		return SendReplyAsync(payload, ioBehavior, cancellationToken);
@@ -940,9 +931,9 @@ internal sealed class ServerSession
 	}
 
 	// Continues a conversation with the server by sending a reply to a packet received with 'Receive' or 'ReceiveReply'.
-	public ValueTask<int> SendReplyAsync(PayloadData payload, IOBehavior ioBehavior, CancellationToken cancellationToken)
+	public ValueTask SendReplyAsync(PayloadData payload, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
-		ValueTask<int> task;
+		ValueTask task;
 		try
 		{
 			VerifyConnected();
@@ -951,7 +942,7 @@ internal sealed class ServerSession
 		catch (Exception ex)
 		{
 			Log.Debug(ex, "Session{0} failed in SendReplyAsync", m_logArguments);
-			task = ValueTaskExtensions.FromException<int>(ex);
+			task = ValueTaskExtensions.FromException(ex);
 		}
 
 		if (task.IsCompletedSuccessfully)
@@ -960,11 +951,11 @@ internal sealed class ServerSession
 		return SendReplyAsyncAwaited(task);
 	}
 
-	private async ValueTask<int> SendReplyAsyncAwaited(ValueTask<int> task)
+	private async ValueTask SendReplyAsyncAwaited(ValueTask task)
 	{
 		try
 		{
-			return await task.ConfigureAwait(false);
+			await task.ConfigureAwait(false);
 		}
 		catch (Exception ex)
 		{
@@ -997,33 +988,74 @@ internal sealed class ServerSession
 		{
 			if (m_state == State.Closed)
 				throw new ObjectDisposedException(nameof(ServerSession));
-			if (m_state != State.Connected && m_state != State.Querying && m_state != State.CancelingQuery && m_state != State.ClearingPendingCancellation && m_state != State.Closing)
+			if (m_state != State.Connected && m_state != State.Querying && m_state != State.CancelingQuery && m_state != State.Closing)
 				throw new InvalidOperationException("ServerSession is not connected.");
 		}
 	}
 
-	private async Task<bool> OpenTcpSocketAsync(ConnectionSettings cs, ILoadBalancer loadBalancer, IOBehavior ioBehavior, CancellationToken cancellationToken)
+	private async Task<bool> OpenTcpSocketAsync(ConnectionSettings cs, ILoadBalancer loadBalancer, Activity? activity, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
-		var hostNames = loadBalancer.LoadBalance(cs.HostNames!);
-		foreach (var hostName in hostNames)
+		// set activity tags for TCP/IP
 		{
+			m_activityTags.Add(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportTcpIpValue);
+			string? port = cs.Port == 3306 ? default : cs.Port.ToString(CultureInfo.InvariantCulture);
+			if (port is not null)
+				m_activityTags.Add(ActivitySourceHelper.NetPeerPortTagName, port);
+			if (activity is { IsAllDataRequested: true })
+			{
+				activity.SetTag(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportTcpIpValue);
+				if (port is not null)
+					activity.SetTag(ActivitySourceHelper.NetPeerPortTagName, port);
+			}
+		}
+
+		var hostNames = loadBalancer.LoadBalance(cs.HostNames!);
+		for (var hostNameIndex = 0; hostNameIndex < hostNames.Count; hostNameIndex++)
+		{
+			var hostName = hostNames[hostNameIndex];
 			IPAddress[] ipAddresses;
 			try
 			{
 				ipAddresses = ioBehavior == IOBehavior.Asynchronous
+#if NET6_0_OR_GREATER
+					? await Dns.GetHostAddressesAsync(hostName, cancellationToken).ConfigureAwait(false)
+#else
 					? await Dns.GetHostAddressesAsync(hostName).ConfigureAwait(false)
+#endif
 					: Dns.GetHostAddresses(hostName);
 			}
-			catch (SocketException)
+			catch (SocketException ex)
 			{
 				// name couldn't be resolved
+				Log.Warn("Session{0} failed to resolve HostName '{1}' ({2} of {3}): {4}", m_logArguments[0], hostName, hostNameIndex + 1, hostNames.Count, ex.Message);
 				continue;
 			}
 
 			// need to try IP Addresses one at a time: https://github.com/dotnet/corefx/issues/5829
-			foreach (var ipAddress in ipAddresses)
+			for (var ipAddressIndex = 0; ipAddressIndex < ipAddresses.Length; ipAddressIndex++)
 			{
-				Log.Trace("Session{0} connecting to IpAddress {1} for HostName '{2}'", m_logArguments[0], ipAddress, hostName);
+				var ipAddress = ipAddresses[ipAddressIndex];
+				var ipAddressString = ipAddress.ToString();
+				if (Log.IsTraceEnabled())
+					Log.Trace("Session{0} connecting to IpAddress {1} ({2} of {3}) for HostName '{4}' ({5} of {6})", m_logArguments[0], ipAddressString, ipAddressIndex + 1, ipAddresses.Length, hostName, hostNameIndex + 1, hostNames.Count);
+
+				// set activity tags for the current IP address/hostname
+				{
+					m_activityTags[ActivitySourceHelper.NetPeerIpTagName] = ipAddressString;
+					if (ipAddressString != hostName)
+						m_activityTags[ActivitySourceHelper.NetPeerNameTagName] = hostName;
+					else
+						m_activityTags.Remove(ActivitySourceHelper.NetPeerNameTagName);
+
+					if (activity is { IsAllDataRequested: true })
+					{
+						activity.SetTag(ActivitySourceHelper.NetPeerIpTagName, ipAddressString);
+						if (ipAddressString != hostName)
+							activity.SetTag(ActivitySourceHelper.NetPeerNameTagName, hostName);
+						else
+							activity.SetTag(ActivitySourceHelper.NetPeerNameTagName, null);
+					}
+				}
 				TcpClient? tcpClient = null;
 				try
 				{
@@ -1035,7 +1067,11 @@ internal sealed class ServerSession
 						{
 							if (ioBehavior == IOBehavior.Asynchronous)
 							{
+#if NET5_0_OR_GREATER
+								await tcpClient.ConnectAsync(ipAddress, cs.Port, cancellationToken).ConfigureAwait(false);
+#else
 								await tcpClient.ConnectAsync(ipAddress, cs.Port).ConfigureAwait(false);
+#endif
 							}
 							else
 							{
@@ -1056,7 +1092,7 @@ internal sealed class ServerSession
 								}
 							}
 						}
-						catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+						catch (Exception ex) when (cancellationToken.IsCancellationRequested && ex is ObjectDisposedException or SocketException)
 						{
 							SafeDispose(ref tcpClient);
 							Log.Info("Session{0} connect timeout expired connecting to IpAddress {1} for HostName '{2}'", m_logArguments[0], ipAddress, hostName);
@@ -1064,9 +1100,23 @@ internal sealed class ServerSession
 						}
 					}
 				}
-				catch (SocketException)
+				catch (SocketException ex)
 				{
 					SafeDispose(ref tcpClient);
+
+					// if this is the final IP address in the list, throw a fatal exception; otherwise try the next IP address
+					if (hostNameIndex == hostNames.Count - 1 && ipAddressIndex == ipAddresses.Length - 1)
+					{
+						lock (m_lock)
+							m_state = State.Failed;
+						if (hostNames.Count == 1 && ipAddresses.Length == 1)
+							Log.Info("Session{0} failed to connect to IpAddress {1} for HostName '{2}': {3}", m_logArguments[0], ipAddress, hostName, ex.Message);
+						else
+							Log.Info("Session{0} failed to connect to IpAddress {1} ({2} of {3}) for HostName '{4}' ({5} of {6}): {7}", m_logArguments[0], ipAddress, ipAddressIndex + 1, ipAddresses.Length, hostName, hostNameIndex + 1, hostNames.Count, ex.Message);
+						throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, "Unable to connect to any of the specified MySQL hosts.");
+					}
+
+					Log.Trace("Session{0} failed to connect to IpAddress {1} ({2} of {3}) for HostName '{4}' ({5} of {6}): {7}", m_logArguments[0], ipAddress, ipAddressIndex + 1, ipAddresses.Length, hostName, hostNameIndex + 1, hostNames.Count, ex.Message);
 					continue;
 				}
 
@@ -1085,14 +1135,6 @@ internal sealed class ServerSession
 					m_socket.NoDelay = true;
 					m_stream = m_tcpClient.GetStream();
 					m_socket.SetKeepAlive(cs.Keepalive);
-
-					m_activityTags.Add(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportTcpIpValue);
-					var ipAddressString = ipAddress.ToString();
-					m_activityTags.Add(ActivitySourceHelper.NetPeerIpTagName, ipAddressString);
-					if (ipAddressString != hostName)
-						m_activityTags.Add(ActivitySourceHelper.NetPeerNameTagName, hostName);
-					if (cs.Port != 3306)
-						m_activityTags.Add(ActivitySourceHelper.NetPeerPortTagName, cs.Port.ToString(CultureInfo.InvariantCulture));
 				}
 				catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
 				{
@@ -1112,12 +1154,24 @@ internal sealed class ServerSession
 		return false;
 	}
 
-	private async Task<bool> OpenUnixSocketAsync(ConnectionSettings cs, IOBehavior ioBehavior, CancellationToken cancellationToken)
+	private async Task<bool> OpenUnixSocketAsync(ConnectionSettings cs, Activity? activity, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		m_logArguments[1] = cs.UnixSocket;
 		Log.Trace("Session{0} connecting to UNIX Socket '{1}'", m_logArguments);
+
+		// set activity tags
+		{
+			m_activityTags.Add(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportUnixValue);
+			m_activityTags.Add(ActivitySourceHelper.NetPeerNameTagName, cs.UnixSocket);
+			if (activity is { IsAllDataRequested: true })
+			{
+				activity.SetTag(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportUnixValue);
+				activity.SetTag(ActivitySourceHelper.NetPeerNameTagName, cs.UnixSocket);
+			}
+		}
+
 		var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.IP);
-		var unixEp = new UnixEndPoint(cs.UnixSocket!);
+		var unixEp = new UnixDomainSocketEndPoint(cs.UnixSocket!);
 		try
 		{
 			using (cancellationToken.Register(() => socket.Dispose()))
@@ -1150,9 +1204,6 @@ internal sealed class ServerSession
 			m_socket = socket;
 			m_stream = new NetworkStream(socket);
 
-			m_activityTags.Add(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportUnixValue);
-			m_activityTags.Add(ActivitySourceHelper.NetPeerNameTagName, cs.UnixSocket);
-
 			lock (m_lock)
 				m_state = State.Connected;
 			return true;
@@ -1161,16 +1212,24 @@ internal sealed class ServerSession
 		return false;
 	}
 
-#if NET45
-#pragma warning disable CS1998 // Async method lacks 'await' operators and will run synchronously
-#endif
-	private async Task<bool> OpenNamedPipeAsync(ConnectionSettings cs, int startTickCount, IOBehavior ioBehavior, CancellationToken cancellationToken)
-#if NET45
-#pragma warning restore CS1998 // Async method lacks 'await' operators and will run synchronously
-#endif
+	private async Task<bool> OpenNamedPipeAsync(ConnectionSettings cs, int startTickCount, Activity? activity, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		if (Log.IsTraceEnabled())
 			Log.Trace("Session{0} connecting to NamedPipe '{1}' on Server '{2}'", m_logArguments[0], cs.PipeName, cs.HostNames![0]);
+
+		// set activity tags
+		{
+			// see https://docs.microsoft.com/en-us/windows/win32/ipc/pipe-names for pipe name format
+			var pipeName = @"\\" + cs.HostNames![0] + @"\pipe\" + cs.PipeName;
+			m_activityTags.Add(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportNamedPipeValue);
+			m_activityTags.Add(ActivitySourceHelper.NetPeerNameTagName, pipeName);
+			if (activity is { IsAllDataRequested: true })
+			{
+				activity.SetTag(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportNamedPipeValue);
+				activity.SetTag(ActivitySourceHelper.NetPeerNameTagName, pipeName);
+			}
+		}
+
 		var namedPipeStream = new NamedPipeClientStream(cs.HostNames![0], cs.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
 		var timeout = Math.Max(1, cs.ConnectionTimeoutMilliseconds - unchecked(Environment.TickCount - startTickCount));
 		try
@@ -1179,11 +1238,9 @@ internal sealed class ServerSession
 			{
 				try
 				{
-#if !NET45
 					if (ioBehavior == IOBehavior.Asynchronous)
 						await namedPipeStream.ConnectAsync(timeout, cancellationToken).ConfigureAwait(false);
 					else
-#endif
 						namedPipeStream.Connect(timeout);
 				}
 				catch (Exception ex) when ((ex is ObjectDisposedException && cancellationToken.IsCancellationRequested) || ex is TimeoutException)
@@ -1202,10 +1259,6 @@ internal sealed class ServerSession
 		if (namedPipeStream.IsConnected)
 		{
 			m_stream = namedPipeStream;
-
-			// see https://docs.microsoft.com/en-us/windows/win32/ipc/pipe-names for pipe name format
-			m_activityTags.Add(ActivitySourceHelper.NetTransportTagName, ActivitySourceHelper.NetTransportNamedPipeValue);
-			m_activityTags.Add(ActivitySourceHelper.NetPeerNameTagName, @"\\" + cs.HostNames![0] + @"\pipe\" + cs.PipeName);
 
 			lock (m_lock)
 				m_state = State.Connected;
@@ -1246,7 +1299,7 @@ internal sealed class ServerSession
 					{
 						m_logArguments[1] = cs.CertificateThumbprint;
 						Log.Error("Session{0} certificate with Thumbprint={1} not found in store", m_logArguments);
-						throw new SingleStoreException("Certificate with Thumbprint {0} not found".FormatInvariant(cs.CertificateThumbprint));
+						throw new SingleStoreException($"Certificate with Thumbprint {cs.CertificateThumbprint} not found");
 					}
 
 					clientCertificates = new(foundCertificates);
@@ -1271,11 +1324,8 @@ internal sealed class ServerSession
 				var certificate = new X509Certificate2(cs.CertificateFile, cs.CertificatePassword, X509KeyStorageFlags.MachineKeySet);
 				if (!certificate.HasPrivateKey)
 				{
-#if NET45
-					certificate.Reset();
-#else
 					certificate.Dispose();
-#endif
+
 					m_logArguments[1] = cs.CertificateFile;
 					Log.Error("Session{0} no private key included with CertificateFile '{1}'", m_logArguments);
 					throw new SingleStoreException("CertificateFile does not contain a private key. " +
@@ -1348,7 +1398,11 @@ internal sealed class ServerSession
 						// load the certificate at this index; note that 'new X509Certificate' stops at the end of the first certificate it loads
 						m_logArguments[1] = index;
 						Log.Trace("Session{0} loading certificate at Index {1} in the CA certificate file.", m_logArguments);
+#if NET5_0_OR_GREATER
+						var caCertificate = new X509Certificate2(certificateBytes.AsSpan(index, (nextIndex == -1 ? certificateBytes.Length : nextIndex) - index), default(ReadOnlySpan<char>), X509KeyStorageFlags.MachineKeySet);
+#else
 						var caCertificate = new X509Certificate2(Utility.ArraySlice(certificateBytes, index, (nextIndex == -1 ? certificateBytes.Length : nextIndex) - index), default(string), X509KeyStorageFlags.MachineKeySet);
+#endif
 						certificateChain.ChainPolicy.ExtraStore.Add(caCertificate);
 					}
 					catch (CryptographicException ex)
@@ -1367,11 +1421,7 @@ internal sealed class ServerSession
 			}
 			finally
 			{
-#if NET45
-				certificateChain?.Reset();
-#else
 				certificateChain?.Dispose();
-#endif
 			}
 		}
 
@@ -1457,13 +1507,11 @@ internal sealed class ServerSession
 			{
 #if NET5_0_OR_GREATER
 				sslStream.AuthenticateAsClient(clientAuthenticationOptions);
-#elif NET45_OR_GREATER || NETCOREAPP2_0_OR_GREATER || NETSTANDARD2_0_OR_GREATER
+#else
 				sslStream.AuthenticateAsClient(clientAuthenticationOptions.TargetHost,
 					clientAuthenticationOptions.ClientCertificates,
 					clientAuthenticationOptions.EnabledSslProtocols,
 					checkCertificateRevocation);
-#else
-				await sslStream.AuthenticateAsClientAsync(HostName, clientCertificates, sslProtocols, checkCertificateRevocation).ConfigureAwait(false);
 #endif
 			}
 			var sslByteHandler = new StreamByteHandler(sslStream);
@@ -1497,11 +1545,7 @@ internal sealed class ServerSession
 		}
 		finally
 		{
-#if NET45
-			caCertificateChain?.Reset();
-#else
 			caCertificateChain?.Dispose();
-#endif
 		}
 
 		// Returns a X509CertificateCollection containing the single certificate contained in 'sslKeyFile' (PEM private key) and 'sslCertificateFile' (PEM certificate).
@@ -1511,6 +1555,14 @@ internal sealed class ServerSession
 			throw new NotSupportedException("SslCert and SslKey connection string options are not supported in netstandard2.0.");
 #elif NET5_0_OR_GREATER
 			m_clientCertificate = X509Certificate2.CreateFromPemFile(sslCertificateFile, sslKeyFile);
+			if (Utility.IsWindows())
+			{
+				// Schannel has a bug where ephemeral keys can't be loaded: https://github.com/dotnet/runtime/issues/23749#issuecomment-485947319
+				// The workaround is to export the key (which may make it "Perphemeral"): https://github.com/dotnet/runtime/issues/23749#issuecomment-739895373
+				var oldCertificate = m_clientCertificate;
+				m_clientCertificate = new X509Certificate2(m_clientCertificate.Export(X509ContentType.Pkcs12));
+				oldCertificate.Dispose();
+			}
 			return new() { m_clientCertificate };
 #else
 			m_logArguments[1] = sslKeyFile;
@@ -1542,7 +1594,6 @@ internal sealed class ServerSession
 				RSA rsa;
 				try
 				{
-#pragma warning disable CA1416
 					// SslStream on Windows needs a KeyContainerName to be set
 					var csp = new CspParameters
 					{
@@ -1552,7 +1603,6 @@ internal sealed class ServerSession
 					{
 						PersistKeyInCsp = true,
 					};
-#pragma warning restore
 				}
 				catch (PlatformNotSupportedException)
 				{
@@ -1560,7 +1610,7 @@ internal sealed class ServerSession
 				}
 				rsa.ImportParameters(rsaParameters);
 
-#if NET45 || NET461 || NET471
+#if NET461 || NET471
 				var certificate = new X509Certificate2(sslCertificateFile, "", X509KeyStorageFlags.MachineKeySet)
 				{
 					PrivateKey = rsa,
@@ -1618,20 +1668,21 @@ internal sealed class ServerSession
 
 	private async Task GetRealServerDetailsAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
-		Log.Debug("Session{0} is getting CONNECTION_ID(), VERSION(), S2Version from server", m_logArguments);
+		Log.Debug("Session{0} is getting CONNECTION_ID(), VERSION(), S2Version, aggregator_id from server", m_logArguments);
 		try
 		{
-			await SendAsync(QueryPayload.Create(SupportsQueryAttributes, "SELECT CONNECTION_ID(), VERSION(), @@memsql_version;"), ioBehavior, cancellationToken).ConfigureAwait(false);
+			var payload = SupportsQueryAttributes ? s_selectConnectionIdVersionWithAttributesPayload : s_selectConnectionIdVersionNoAttributesPayload;
+			await SendAsync(payload, ioBehavior, cancellationToken).ConfigureAwait(false);
 
-			// column count: 3
+			// column count: 4
 			await ReceiveReplyAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
 
-			// CONNECTION_ID(), VERSION() and @@memsql_version columns
+			// CONNECTION_ID(), VERSION(), @@memsql_version and @@aggregator_id columns
+			await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
 			await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
 			await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
 			await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
 
-			PayloadData payload;
 			if (!SupportsDeprecateEof)
 			{
 				payload = await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
@@ -1640,19 +1691,28 @@ internal sealed class ServerSession
 
 			// first (and only) row
 			payload = await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
-			static void ReadRow(ReadOnlySpan<byte> span, out int? connectionId, out byte[] serverVersion, out byte[] s2Version)
+			static void ReadRow(ReadOnlySpan<byte> span, out int? connectionId, out byte[] serverVersion, out byte[] s2Version, out int? aggregator_id)
 			{
 				var reader = new ByteArrayReader(span);
 				var length = reader.ReadLengthEncodedIntegerOrNull();
 				connectionId = (length != -1 && Utf8Parser.TryParse(reader.ReadByteString(length), out int id, out _)) ? id : default(int?);
 
 				length = reader.ReadLengthEncodedIntegerOrNull();
+#pragma warning disable CA1825 // Avoid zero-length array allocations
 				serverVersion = length != -1 ? reader.ReadByteString(length).ToArray() : new byte[0];
+#pragma warning restore CA1825 // Avoid zero-length array allocations
 
 				length = reader.ReadLengthEncodedIntegerOrNull();
+#pragma warning disable CA1825 // Avoid zero-length array allocations
 				s2Version = length != -1 ? reader.ReadByteString(length).ToArray() : new byte[0];
+#pragma warning restore CA1825 // Avoid zero-length array allocations
+
+				length = reader.ReadLengthEncodedIntegerOrNull();
+#pragma warning disable CA1825 // Avoid zero-length array allocations
+				aggregator_id = (length != -1 && Utf8Parser.TryParse(reader.ReadByteString(length), out int node_id, out _)) ? node_id : default(int?);
+#pragma warning restore CA1825 // Avoid zero-length array allocations
 			}
-			ReadRow(payload.Span, out var connectionId, out var serverVersion, out var s2Version);
+			ReadRow(payload.Span, out var connectionId, out var serverVersion, out var s2Version, out var aggregator_id);
 
 			// OK/EOF payload
 			payload = await ReceiveReplyAsync(ioBehavior, CancellationToken.None).ConfigureAwait(false);
@@ -1679,6 +1739,16 @@ internal sealed class ServerSession
 				Log.Debug("Session{0} setting S2ServerVersion to {2}", m_logArguments[0], S2ServerVersion.OriginalString, newS2Version.OriginalString);
 				S2ServerVersion = newS2Version;
 			}
+			if (aggregator_id.HasValue)
+			{
+				Log.Debug("Session{0} setting AggregatorId to {2}", m_logArguments[0], aggregator_id.Value);
+				AggregatorId = aggregator_id.Value;
+			}
+			else
+			{
+				// dummy value, @@aggregator_id should always be set
+				AggregatorId = -1;
+			}
 		}
 		catch (SingleStoreException ex)
 		{
@@ -1693,14 +1763,8 @@ internal sealed class ServerSession
 		Utility.Dispose(ref m_stream);
 		SafeDispose(ref m_tcpClient);
 		SafeDispose(ref m_socket);
-#if NET45
-		m_clientCertificate?.Reset();
-		m_clientCertificate = null;
-#else
 		Utility.Dispose(ref m_clientCertificate);
-#endif
 		m_activityTags.Clear();
-		m_activityTags.Add(ActivitySourceHelper.DatabaseSystemTagName, ActivitySourceHelper.DatabaseSystemValue);
 	}
 
 	/// <summary>
@@ -1737,40 +1801,32 @@ internal sealed class ServerSession
 			connection.SetState(ConnectionState.Closed);
 	}
 
-	private void VerifyState(State state)
+	private void VerifyState(params State[] expectedStates)
 	{
-		if (m_state != state)
-		{
-			Log.Error("Session{0} should have SessionStateExpected {1} but was SessionState {2}", m_logArguments[0], state, m_state);
-			throw new InvalidOperationException("Expected state to be {0} but was {1}.".FormatInvariant(state, m_state));
-		}
+	    if (!expectedStates.Contains(m_state))
+	    {
+	        var expectedStatesString = string.Join(" or ", expectedStates.Select(s => s.ToString()));
+	        Log.Error("Session{0} should have SessionStateExpected {1} but was SessionState {2}", m_logArguments[0], expectedStatesString, m_state);
+	        throw new InvalidOperationException("Expected state to be ({0}) but was {1}.".FormatInvariant(expectedStatesString, m_state));
+	    }
 	}
 
-	private void VerifyState(State state1, State state2, State state3)
-	{
-		if (m_state != state1 && m_state != state2 && m_state != state3)
-		{
-			Log.Error("Session{0} should have SessionStateExpected {1} or SessionStateExpected2 {2} or SessionStateExpected3 {3} but was SessionState {4}", m_logArguments[0], state1, state2, state3, m_state);
-			throw new InvalidOperationException("Expected state to be ({0}|{1}|{2}) but was {3}.".FormatInvariant(state1, state2, state3, m_state));
-		}
-	}
+	internal bool SslIsEncrypted => m_sslStream?.IsEncrypted is true;
 
-	internal bool SslIsEncrypted => m_sslStream?.IsEncrypted ?? false;
+	internal bool SslIsSigned => m_sslStream?.IsSigned is true;
 
-	internal bool SslIsSigned => m_sslStream?.IsSigned ?? false;
+	internal bool SslIsAuthenticated => m_sslStream?.IsAuthenticated is true;
 
-	internal bool SslIsAuthenticated => m_sslStream?.IsAuthenticated ?? false;
-
-	internal bool SslIsMutuallyAuthenticated => m_sslStream?.IsMutuallyAuthenticated ?? false;
+	internal bool SslIsMutuallyAuthenticated => m_sslStream?.IsMutuallyAuthenticated is true;
 
 	internal SslProtocols SslProtocol => m_sslStream?.SslProtocol ?? SslProtocols.None;
 
-	private byte[] CreateConnectionAttributes(string programName)
+	private byte[] CreateConnectionAttributes(string programName, string connAttrsExtra)
 	{
 		Log.Trace("Session{0} creating connection attributes", m_logArguments);
 		var attributesWriter = new ByteBufferWriter();
 		attributesWriter.WriteLengthEncodedString("_client_name");
-		attributesWriter.WriteLengthEncodedString("SingleStoreConnector");
+		attributesWriter.WriteLengthEncodedString("SingleStore .NET Connector");
 		attributesWriter.WriteLengthEncodedString("_client_version");
 
 		var version = typeof(ServerSession).GetTypeInfo().Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
@@ -1807,6 +1863,16 @@ internal sealed class ServerSession
 		{
 			attributesWriter.WriteLengthEncodedString("program_name");
 			attributesWriter.WriteLengthEncodedString(programName!);
+		}
+		if (connAttrsExtra.Length != 0)
+		{
+			foreach (var attr in connAttrsExtra.Split(','))
+			{
+				foreach (var attrPart in attr.Split(':'))
+				{
+					attributesWriter.WriteLengthEncodedString(attrPart);
+				}
+			}
 		}
 		using var connectionAttributesPayload = attributesWriter.ToPayloadData();
 		var connectionAttributes = connectionAttributesPayload.Span;
@@ -1878,9 +1944,6 @@ internal sealed class ServerSession
 		// The session is connected to a server and the active query is being cancelled.
 		CancelingQuery,
 
-		// A cancellation is pending on the server and needs to be cleared.
-		ClearingPendingCancellation,
-
 		// The session is closing.
 		Closing,
 
@@ -1903,40 +1966,42 @@ internal sealed class ServerSession
 
 		protected override void OnStatementBegin(int index)
 		{
-			if (index + 10 < m_sql.Length && string.Equals("delimiter ", m_sql.Substring(index, 10), StringComparison.OrdinalIgnoreCase))
+			if (index + 10 < m_sql.Length && m_sql.AsSpan(index, 10).Equals("delimiter ".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				HasDelimiter = true;
 		}
 
-		readonly string m_sql;
+		private readonly string m_sql;
 	}
 
-	static ReadOnlySpan<byte> BeginCertificateBytes => new byte[] { 45, 45, 45, 45, 45, 66, 69, 71, 73, 78, 32, 67, 69, 82, 84, 73, 70, 73, 67, 65, 84, 69, 45, 45, 45, 45, 45 }; // -----BEGIN CERTIFICATE-----
-	static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(ServerSession));
-	static readonly PayloadData s_setNamesUtf8NoAttributesPayload = QueryPayload.Create(false, "SET NAMES utf8;");
-	static readonly PayloadData s_setNamesUtf8mb4NoAttributesPayload = QueryPayload.Create(false, "SET NAMES utf8mb4;");
-	static readonly PayloadData s_setNamesUtf8WithAttributesPayload = QueryPayload.Create(true, "SET NAMES utf8;");
-	static readonly PayloadData s_setNamesUtf8mb4WithAttributesPayload = QueryPayload.Create(true, "SET NAMES utf8mb4;");
-	static int s_lastId;
+	private static ReadOnlySpan<byte> BeginCertificateBytes => "-----BEGIN CERTIFICATE-----"u8;
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(ServerSession));
+	private static readonly PayloadData s_setNamesUtf8NoAttributesPayload = QueryPayload.Create(false, "SET NAMES utf8;"u8);
+	private static readonly PayloadData s_setNamesUtf8mb4NoAttributesPayload = QueryPayload.Create(false, "SET NAMES utf8mb4;"u8);
+	private static readonly PayloadData s_setNamesUtf8WithAttributesPayload = QueryPayload.Create(true, "SET NAMES utf8;"u8);
+	private static readonly PayloadData s_setNamesUtf8mb4WithAttributesPayload = QueryPayload.Create(true, "SET NAMES utf8mb4;"u8);
+	private static readonly PayloadData s_selectConnectionIdVersionNoAttributesPayload = QueryPayload.Create(false, "SELECT CONNECTION_ID(), VERSION(), @@memsql_version, @@aggregator_id;"u8);
+	private static readonly PayloadData s_selectConnectionIdVersionWithAttributesPayload = QueryPayload.Create(true, "SELECT CONNECTION_ID(), VERSION(), @@memsql_version, @@aggregator_id;"u8);
+	private static int s_lastId;
 
-	readonly object m_lock;
-	readonly object?[] m_logArguments;
-	readonly ArraySegmentHolder<byte> m_payloadCache;
-	readonly ActivityTagsCollection m_activityTags;
-	State m_state;
-	TcpClient? m_tcpClient;
-	Socket? m_socket;
-	Stream? m_stream;
-	SslStream? m_sslStream;
-	X509Certificate2? m_clientCertificate;
-	IPayloadHandler? m_payloadHandler;
-	bool m_useCompression;
-	bool m_isSecureConnection;
-	bool m_supportsComMulti;
-	bool m_supportsConnectionAttributes;
-	bool m_supportsDeprecateEof;
-	bool m_supportsSessionTrack;
-	bool m_supportsPipelining;
-	CharacterSet m_characterSet;
-	PayloadData m_setNamesPayload;
-	Dictionary<string, PreparedStatements>? m_preparedStatements;
+	private readonly object m_lock;
+	private readonly object?[] m_logArguments;
+	private readonly ArraySegmentHolder<byte> m_payloadCache;
+	private readonly ActivityTagsCollection m_activityTags;
+	private State m_state;
+	private TcpClient? m_tcpClient;
+	private Socket? m_socket;
+	private Stream? m_stream;
+	private SslStream? m_sslStream;
+	private X509Certificate2? m_clientCertificate;
+	private IPayloadHandler? m_payloadHandler;
+	private bool m_useCompression;
+	private bool m_isSecureConnection;
+	private bool m_supportsComMulti;
+	private bool m_supportsConnectionAttributes;
+	private bool m_supportsDeprecateEof;
+	private bool m_supportsSessionTrack;
+	private bool m_supportsPipelining;
+	private CharacterSet m_characterSet;
+	private PayloadData m_setNamesPayload;
+	private Dictionary<string, PreparedStatements>? m_preparedStatements;
 }

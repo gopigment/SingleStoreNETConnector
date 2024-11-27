@@ -49,6 +49,9 @@ namespace SingleStoreConnector;
 /// </code>
 /// </summary>
 /// <remarks>The proposed ADO.NET API that <see cref="SingleStoreBatch"/> is based on is not finalized. This API is experimental and may change in the future.</remarks>
+#if NET6_0_OR_GREATER
+#pragma warning disable CA1063 // Implement IDisposable Correctly
+#endif
 public sealed class SingleStoreBatch :
 #if NET6_0_OR_GREATER
 	DbBatch,
@@ -120,7 +123,7 @@ public sealed class SingleStoreBatch :
 #else
 	public async Task<SingleStoreDataReader> ExecuteReaderAsync(CancellationToken cancellationToken = default) =>
 #endif
-		(SingleStoreDataReader) await ExecuteDbDataReaderAsync(CommandBehavior.Default, cancellationToken);
+		(SingleStoreDataReader) await ExecuteDbDataReaderAsync(CommandBehavior.Default, cancellationToken).ConfigureAwait(false);
 
 	//// TODO: new ExecuteReaderAsync(CommandBehavior)
 
@@ -130,7 +133,7 @@ public sealed class SingleStoreBatch :
 	private DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
 #endif
 	{
-		((ICancellableCommand) this).ResetCommandTimeout();
+		this.ResetCommandTimeout();
 		return ExecuteReaderAsync(behavior, IOBehavior.Synchronous, CancellationToken.None).GetAwaiter().GetResult();
 	}
 
@@ -140,7 +143,7 @@ public sealed class SingleStoreBatch :
 	private async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
 #endif
 	{
-		((ICancellableCommand) this).ResetCommandTimeout();
+		this.ResetCommandTimeout();
 		using var registration = ((ICancellableCommand) this).RegisterCancel(cancellationToken);
 		return await ExecuteReaderAsync(behavior, AsyncIOBehavior, cancellationToken).ConfigureAwait(false);
 	}
@@ -148,7 +151,7 @@ public sealed class SingleStoreBatch :
 	private Task<SingleStoreDataReader> ExecuteReaderAsync(CommandBehavior behavior, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		if (!IsValid(out var exception))
-		 	return Utility.TaskFromException<SingleStoreDataReader>(exception);
+		 	return Task.FromException<SingleStoreDataReader>(exception);
 
 		CurrentCommandBehavior = behavior;
 		foreach (SingleStoreBatchCommand batchCommand in BatchCommands)
@@ -188,11 +191,19 @@ public sealed class SingleStoreBatch :
 #endif
 		ExecuteScalarAsync(AsyncIOBehavior, cancellationToken);
 
+	public
 #if NET6_0_OR_GREATER
-	public override int Timeout { get; set; }
-#else
-	public int Timeout { get; set; }
+		override
 #endif
+		int Timeout
+	{
+		get => m_timeout;
+		set
+		{
+			m_timeout = value;
+			((ICancellableCommand) this).EffectiveCommandTimeout = null;
+		}
+	}
 
 #if NET6_0_OR_GREATER
 	public override void Prepare()
@@ -235,18 +246,22 @@ public sealed class SingleStoreBatch :
 #endif
 	{
 		m_isDisposed = true;
+#if NET6_0_OR_GREATER
+		base.Dispose();
+#endif
 	}
 
 	internal CommandBehavior CurrentCommandBehavior { get; set; }
 
 	int ICancellableCommand.CommandId => m_commandId;
 	int ICancellableCommand.CommandTimeout => Timeout;
+	int? ICancellableCommand.EffectiveCommandTimeout { get; set; }
 	int ICancellableCommand.CancelAttemptCount { get; set; }
 
-	IDisposable? ICancellableCommand.RegisterCancel(CancellationToken cancellationToken)
+	CancellationTokenRegistration ICancellableCommand.RegisterCancel(CancellationToken cancellationToken)
 	{
 		if (!cancellationToken.CanBeCanceled)
-			return null;
+			return default;
 
 		m_cancelAction ??= Cancel;
 		return cancellationToken.Register(m_cancelAction);
@@ -276,7 +291,7 @@ public sealed class SingleStoreBatch :
 
 	private async Task<int> ExecuteNonQueryAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
-		((ICancellableCommand) this).ResetCommandTimeout();
+		this.ResetCommandTimeout();
 		using var registration = ((ICancellableCommand) this).RegisterCancel(cancellationToken);
 		using var reader = await ExecuteReaderAsync(CommandBehavior.Default, ioBehavior, cancellationToken).ConfigureAwait(false);
 		do
@@ -290,7 +305,7 @@ public sealed class SingleStoreBatch :
 
 	private async Task<object?> ExecuteScalarAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
-		((ICancellableCommand) this).ResetCommandTimeout();
+		this.ResetCommandTimeout();
 		using var registration = ((ICancellableCommand) this).RegisterCancel(cancellationToken);
 		var hasSetResult = false;
 		object? result = null;
@@ -316,7 +331,7 @@ public sealed class SingleStoreBatch :
 		else if (Connection is null)
 			exception = new InvalidOperationException("Connection property must be non-null.");
 		else if (Connection.State != ConnectionState.Open && Connection.State != ConnectionState.Connecting)
-			exception = new InvalidOperationException("Connection must be Open; current state is {0}".FormatInvariant(Connection.State));
+			exception = new InvalidOperationException($"Connection must be Open; current state is {Connection.State}");
 		else if (!Connection.IgnoreCommandTransaction && Transaction != Connection.CurrentTransaction)
 			exception = new InvalidOperationException("The transaction associated with this batch is not the connection's active transaction; see https://fl.vu/mysql-trans");
 		else if (BatchCommands.Count == 0)
@@ -334,10 +349,10 @@ public sealed class SingleStoreBatch :
 		else if (Connection is null)
 			exception = new InvalidOperationException("Connection property must be non-null.");
 		else if (Connection.State != ConnectionState.Open)
-			exception = new InvalidOperationException("Connection must be Open; current state is {0}".FormatInvariant(Connection.State));
+			exception = new InvalidOperationException($"Connection must be Open; current state is {Connection.State}");
 		else if (BatchCommands.Count == 0)
 			exception = new InvalidOperationException("BatchCommands must contain a command");
-		else if (Connection?.HasActiveReader ?? false)
+		else if (Connection.HasActiveReader)
 			exception = new InvalidOperationException("Cannot call Prepare when there is an open DataReader for this command; it must be closed first.");
 		else
 			exception = GetExceptionForInvalidCommands();
@@ -360,7 +375,7 @@ public sealed class SingleStoreBatch :
 	private Task PrepareAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		if (!NeedsPrepare(out var exception))
-			return exception is null ? Utility.CompletedTask : Utility.TaskFromException(exception);
+			return exception is null ? Task.CompletedTask : Task.FromException(exception);
 
 		return DoPrepareAsync(ioBehavior, cancellationToken);
 	}
@@ -394,10 +409,11 @@ public sealed class SingleStoreBatch :
 
 	private IOBehavior AsyncIOBehavior => Connection?.AsyncIOBehavior ?? IOBehavior.Asynchronous;
 
-	readonly int m_commandId;
-	bool m_isDisposed;
-	Action? m_cancelAction;
-	Action? m_cancelForCommandTimeoutAction;
-	uint m_cancelTimerId;
-	bool m_commandTimedOut;
+	private readonly int m_commandId;
+	private bool m_isDisposed;
+	private int m_timeout;
+	private Action? m_cancelAction;
+	private Action? m_cancelForCommandTimeoutAction;
+	private uint m_cancelTimerId;
+	private bool m_commandTimedOut;
 }

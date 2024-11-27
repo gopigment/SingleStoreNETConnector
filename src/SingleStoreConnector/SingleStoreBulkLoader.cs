@@ -273,7 +273,7 @@ public sealed class SingleStoreBulkLoader
 			sb.AppendFormat(CultureInfo.InvariantCulture, "({0}) ", string.Join(",", Columns));
 
 		if (Expressions.Count > 0)
-			sb.AppendFormat("SET {0}", string.Join(",", Expressions));
+			sb.AppendFormat(CultureInfo.InvariantCulture, "SET {0}", string.Join(",", Expressions));
 
 		sb.Append(';');
 
@@ -318,6 +318,6 @@ public sealed class SingleStoreBulkLoader
 
 	private static string GenerateSourceFileName() => SourcePrefix + Guid.NewGuid().ToString("N");
 
-	static readonly object s_lock = new();
-	static readonly Dictionary<string, object> s_sources = new();
+	private static readonly object s_lock = new();
+	private static readonly Dictionary<string, object> s_sources = new();
 }

@@ -417,7 +417,7 @@ internal static class ProtocolUtility
 				ValueTaskExtensions.FromException<Packet>(new EndOfStreamException("Expected to read 4 header bytes but only received {0}.".FormatInvariant(headerBytes.Length)));
 		}
 
-		var payloadLength = (int) SerializationUtility.ReadUInt32(headerBytes.Slice(0, 3));
+		var payloadLength = (int) SerializationUtility.ReadUInt32(headerBytes[..3]);
 		int packetSequenceNumber = headerBytes[3];
 
 		Exception? packetOutOfOrderException = null;
@@ -441,7 +441,11 @@ internal static class ProtocolUtility
 			if (protocolErrorBehavior == ProtocolErrorBehavior.Ignore)
 				return default;
 
+#if NETSTANDARD2_1_OR_GREATER || NETCOREAPP3_1_OR_GREATER
+			if (payloadBytes is [ ErrorPayload.Signature, .. ])
+#else
 			if (payloadBytes.Count > 0 && payloadBytes.AsSpan()[0] == ErrorPayload.Signature)
+#endif
 				return new ValueTask<Packet>(new Packet(payloadBytes));
 
 			return ValueTaskExtensions.FromException<Packet>(exception);
@@ -507,29 +511,28 @@ internal static class ProtocolUtility
 		return false;
 	}
 
-	public static ValueTask<int> WritePayloadAsync(IByteHandler byteHandler, Func<int> getNextSequenceNumber, ReadOnlyMemory<byte> payload, IOBehavior ioBehavior)
+	public static ValueTask WritePayloadAsync(IByteHandler byteHandler, Func<int> getNextSequenceNumber, ReadOnlyMemory<byte> payload, IOBehavior ioBehavior)
 	{
 		return payload.Length <= MaxPacketSize ? WritePacketAsync(byteHandler, getNextSequenceNumber(), payload, ioBehavior) :
 			WritePayloadAsyncAwaited(byteHandler, getNextSequenceNumber, payload, ioBehavior);
 
-		static async ValueTask<int> WritePayloadAsyncAwaited(IByteHandler byteHandler, Func<int> getNextSequenceNumber, ReadOnlyMemory<byte> payload, IOBehavior ioBehavior)
+		static async ValueTask WritePayloadAsyncAwaited(IByteHandler byteHandler, Func<int> getNextSequenceNumber, ReadOnlyMemory<byte> payload, IOBehavior ioBehavior)
 		{
 			for (var bytesSent = 0; bytesSent < payload.Length; bytesSent += MaxPacketSize)
 			{
 				var contents = payload.Slice(bytesSent, Math.Min(MaxPacketSize, payload.Length - bytesSent));
 				await WritePacketAsync(byteHandler, getNextSequenceNumber(), contents, ioBehavior).ConfigureAwait(false);
 			}
-			return 0;
 		}
 	}
 
-	private static ValueTask<int> WritePacketAsync(IByteHandler byteHandler, int sequenceNumber, ReadOnlyMemory<byte> contents, IOBehavior ioBehavior)
+	private static ValueTask WritePacketAsync(IByteHandler byteHandler, int sequenceNumber, ReadOnlyMemory<byte> contents, IOBehavior ioBehavior)
 	{
 		var bufferLength = contents.Length + 4;
 		var buffer = ArrayPool<byte>.Shared.Rent(bufferLength);
 		SerializationUtility.WriteUInt32((uint) contents.Length, buffer, 0, 3);
 		buffer[3] = (byte) sequenceNumber;
-		contents.CopyTo(buffer.AsMemory().Slice(4));
+		contents.CopyTo(buffer.AsMemory()[4..]);
 		var task = byteHandler.WriteBytesAsync(new ArraySegment<byte>(buffer, 0, bufferLength), ioBehavior);
 		if (task.IsCompletedSuccessfully)
 		{
@@ -538,11 +541,10 @@ internal static class ProtocolUtility
 		}
 		return WritePacketAsyncAwaited(task, buffer);
 
-		static async ValueTask<int> WritePacketAsyncAwaited(ValueTask<int> task, byte[] buffer)
+		static async ValueTask WritePacketAsyncAwaited(ValueTask task, byte[] buffer)
 		{
 			await task.ConfigureAwait(false);
 			ArrayPool<byte>.Shared.Return(buffer);
-			return 0;
 		}
 	}
 

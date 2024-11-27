@@ -49,7 +49,7 @@ to verify the project builds and runs successfully.
         }
     },
     "ConnectionStrings": {
-        "DefaultConnection": "server=127.0.0.1;user id=root;password=pass;port=3306;database=blog;"
+        "DefaultConnection": "Server=127.0.0.1;User ID=root;Password=pass;Port=3306;Database=blog;"
     }
 }
 ```
@@ -379,5 +379,3 @@ GET https://localhost:5001/api/blog
 // Output:
 []
 ```
-
-If you would like to see all of this code and more on GitHub, check out [SingleStoreConnector.Performance](https://github.com/memsql/SingleStoreNETConnector/tree/master/tests/SingleStoreConnector.Performance).

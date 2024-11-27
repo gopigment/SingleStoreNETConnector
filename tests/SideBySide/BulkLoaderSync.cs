@@ -515,6 +515,189 @@ insert into bulk_load_data_reader_source values(0, 'zero'),(1,'one'),(2,'two'),(
 		Assert.Throws<ArgumentNullException>(() => bulkCopy.WriteToServer(default(DataTable)));
 	}
 
+#if !BASELINE
+	[Fact]
+	public void BulkCopyDataTableWithSingleStoreDecimal()
+	{
+		var dataTable = new DataTable()
+		{
+			Columns =
+			{
+				new DataColumn("id", typeof(int)),
+				new DataColumn("data", typeof(SingleStoreDecimal)),
+			},
+			Rows =
+			{
+				new object[] { 1, new SingleStoreDecimal("1.234") },
+				new object[] { 2, new SingleStoreDecimal("2.345") },
+			},
+		};
+
+		using var connection = new SingleStoreConnection(GetLocalConnectionString());
+		connection.Open();
+		using (var cmd = new SingleStoreCommand(@"drop table if exists bulk_load_data_table;
+create table bulk_load_data_table(a int, b decimal(20, 10));", connection))
+		{
+			cmd.ExecuteNonQuery();
+		}
+
+		var bulkCopy = new SingleStoreBulkCopy(connection)
+		{
+			DestinationTableName = "bulk_load_data_table",
+		};
+		var result = bulkCopy.WriteToServer(dataTable);
+		Assert.Equal(2, result.RowsInserted);
+		Assert.Empty(result.Warnings);
+
+		using (var cmd = new SingleStoreCommand(@"select sum(b) from bulk_load_data_table;", connection))
+		{
+			using var reader = cmd.ExecuteReader();
+			Assert.True(reader.Read());
+			Assert.Equal(3.579m, reader.GetValue(0));
+			Assert.Equal("3.579", reader.GetSingleStoreDecimal(0).ToString().TrimEnd('0'));
+		}
+	}
+
+#if NET6_0_OR_GREATER
+	[Fact]
+	public void BulkCopyDataTableWithDateOnly()
+	{
+		var dataTable = new DataTable()
+		{
+			Columns =
+			{
+				new DataColumn("id", typeof(int)),
+				new DataColumn("date1", typeof(DateOnly)),
+			},
+			Rows =
+			{
+				new object[] { 1, new DateOnly(2021, 3, 4) },
+			},
+		};
+
+		using var connection = new SingleStoreConnection(GetLocalConnectionString());
+		connection.Open();
+		using (var cmd = new SingleStoreCommand(@"drop table if exists bulk_load_data_table;
+create table bulk_load_data_table(a int, date1 date);", connection))
+		{
+			cmd.ExecuteNonQuery();
+		}
+
+		var bulkCopy = new SingleStoreBulkCopy(connection)
+		{
+			DestinationTableName = "bulk_load_data_table",
+		};
+		var result = bulkCopy.WriteToServer(dataTable);
+		Assert.Equal(1, result.RowsInserted);
+		Assert.Empty(result.Warnings);
+
+		using (var cmd = new SingleStoreCommand(@"select * from bulk_load_data_table;", connection))
+		{
+			using var reader = cmd.ExecuteReader();
+			Assert.True(reader.Read());
+			Assert.Equal(new DateOnly(2021, 3, 4), reader.GetDateOnly(1));
+		}
+	}
+
+	[Fact]
+	public void BulkCopyDataTableWithTimeOnly()
+	{
+		var dataTable = new DataTable()
+		{
+			Columns =
+			{
+				new DataColumn("id", typeof(int)),
+				new DataColumn("time1", typeof(TimeOnly)),
+				new DataColumn("time2", typeof(TimeOnly)),
+			},
+			Rows =
+			{
+				new object[] { 1, new TimeOnly(1, 2, 3, 456), new TimeOnly(1, 2, 3, 456) },
+			},
+		};
+
+		using var connection = new SingleStoreConnection(GetLocalConnectionString());
+		connection.Open();
+		using (var cmd = new SingleStoreCommand(@"drop table if exists bulk_load_data_table;
+create table bulk_load_data_table(a int, time1 time, time2 time(6));", connection))
+		{
+			cmd.ExecuteNonQuery();
+		}
+
+		var bulkCopy = new SingleStoreBulkCopy(connection)
+		{
+			DestinationTableName = "bulk_load_data_table",
+		};
+		var result = bulkCopy.WriteToServer(dataTable);
+		Assert.Equal(1, result.RowsInserted);
+		Assert.Empty(result.Warnings);
+
+		using (var cmd = new SingleStoreCommand(@"select * from bulk_load_data_table;", connection))
+		{
+			using var reader = cmd.ExecuteReader();
+			Assert.True(reader.Read());
+			Assert.Equal(new TimeOnly(1, 2, 3), reader.GetTimeOnly(1));
+			Assert.Equal(new TimeOnly(1, 2, 3, 456), reader.GetTimeOnly(2));
+		}
+	}
+#endif
+#endif
+
+	public static IEnumerable<object[]> GetBulkCopyData() =>
+		new object[][]
+		{
+			new object[] { "datetime(6)", new object[] { new DateTime(2021, 3, 4, 5, 6, 7, 890), new DateTime(2020, 1, 2, 3, 4, 5, 678) } },
+			new object[] { "float", new object[] { 1.0f, 0.1f, 0.000001f } },
+			new object[] { "double", new object[] { 1.0, 0.1, 0.000001 } },
+			new object[] { "time(6)", new object[] { TimeSpan.Zero, new TimeSpan(1, 2, 3, 4, 5), new TimeSpan(-1, -3, -5, -7, -9) } },
+		};
+
+	[Theory]
+	[MemberData(nameof(GetBulkCopyData))]
+	public void BulkCopyDataTable(string columnType, object[] rows)
+	{
+		var dataTable = new DataTable()
+		{
+			Columns =
+			{
+				new DataColumn("id", typeof(int)),
+				new DataColumn("data", rows[0].GetType()),
+			},
+		};
+		for (var i = 0; i < rows.Length; i++)
+			dataTable.Rows.Add(i + 1, rows[i]);
+
+		using var connection = new SingleStoreConnection(GetLocalConnectionString());
+		connection.Open();
+		using (var cmd = new SingleStoreCommand($"""
+			drop table if exists bulk_load_data_table;
+			create table bulk_load_data_table(id int, data {columnType});
+			""", connection))
+		{
+			cmd.ExecuteNonQuery();
+		}
+
+		var bulkCopy = new SingleStoreBulkCopy(connection)
+		{
+			DestinationTableName = "bulk_load_data_table",
+		};
+		var result = bulkCopy.WriteToServer(dataTable);
+		Assert.Equal(rows.Length, result.RowsInserted);
+		Assert.Empty(result.Warnings);
+
+		using (var cmd = new SingleStoreCommand(@"select data from bulk_load_data_table order by id;", connection))
+		{
+			using var reader = cmd.ExecuteReader();
+			for (var i = 0; i < rows.Length; i++)
+			{
+				Assert.True(reader.Read());
+				Assert.Equal(rows[i], reader.GetValue(0));
+			}
+			Assert.False(reader.Read());
+			Assert.False(reader.NextResult());
+		}
+	}
+
 	[Fact]
 	public void BulkCopyDataTableWithLongBlob()
 	{
@@ -984,6 +1167,63 @@ create table bulk_load_data_table(str varchar(5), number tinyint);", connection)
 		connection.Open();
 		var bulkCopy = new SingleStoreBulkCopy(connection);
 		Assert.Throws<ArgumentNullException>(() => bulkCopy.WriteToServer(default(DbDataReader)));
+	}
+
+	[Theory]
+	[InlineData(SingleStoreBulkLoaderConflictOption.None, 0, "")]
+	[InlineData(SingleStoreBulkLoaderConflictOption.Ignore, 1, "one")]
+	[InlineData(SingleStoreBulkLoaderConflictOption.Replace, 3, "two")]
+	public void BulkCopyDataTableConflictOption(SingleStoreBulkLoaderConflictOption conflictOption, int expectedRowsInserted, string expected)
+	{
+		var dataTable = new DataTable()
+		{
+			Columns =
+			{
+				new DataColumn("id", typeof(int)),
+				new DataColumn("data", typeof(string)),
+			},
+			Rows =
+			{
+				new object[] { 1, "one" },
+				new object[] { 1, "two" },
+			},
+		};
+
+		using var connection = new SingleStoreConnection(GetLocalConnectionString());
+		connection.Open();
+		using (var cmd = new SingleStoreCommand(@"drop table if exists bulk_load_data_table;
+create table bulk_load_data_table(a int not null primary key auto_increment, b text);", connection))
+		{
+			cmd.ExecuteNonQuery();
+		}
+
+		var bulkCopy = new SingleStoreBulkCopy(connection)
+		{
+			ConflictOption = conflictOption,
+			DestinationTableName = "bulk_load_data_table",
+		};
+
+		switch (conflictOption)
+		{
+		case SingleStoreBulkLoaderConflictOption.None:
+			var exception = Assert.Throws<SingleStoreException>(() => bulkCopy.WriteToServer(dataTable));
+			Assert.Equal(SingleStoreErrorCode.DuplicateKeyEntry, exception.ErrorCode);
+			return;
+
+		case SingleStoreBulkLoaderConflictOption.Replace:
+			var replaceResult = bulkCopy.WriteToServer(dataTable);
+			Assert.Equal(expectedRowsInserted, replaceResult.RowsInserted);
+			Assert.Empty(replaceResult.Warnings);
+			break;
+
+		case SingleStoreBulkLoaderConflictOption.Ignore:
+			var ignoreResult = bulkCopy.WriteToServer(dataTable);
+			Assert.Equal(expectedRowsInserted, ignoreResult.RowsInserted);
+			break;
+		}
+
+		using (var cmd = new SingleStoreCommand("select b from bulk_load_data_table;", connection))
+			Assert.Equal(expected, cmd.ExecuteScalar());
 	}
 #endif
 

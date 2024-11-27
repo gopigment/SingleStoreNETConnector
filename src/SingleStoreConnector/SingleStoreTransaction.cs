@@ -4,6 +4,10 @@ using SingleStoreConnector.Utilities;
 
 namespace SingleStoreConnector;
 
+#if !NET6_0_OR_GREATER
+#pragma warning disable CA1822 // Mark members as static
+#endif
+
 /// <summary>
 /// <see cref="SingleStoreTransaction"/> represents an in-progress transaction on a SingleStore Server.
 /// </summary>
@@ -146,7 +150,7 @@ public sealed class SingleStoreTransaction : DbTransaction
 	public Task SaveAsync(string savepointName, CancellationToken cancellationToken = default) => ExecuteSavepointAsync("", savepointName, Connection?.AsyncIOBehavior ?? IOBehavior.Asynchronous, cancellationToken);
 #endif
 
-	private Task ExecuteSavepointAsync(string command, string savepointName, IOBehavior ioBehavior, CancellationToken cancellationToken)
+	private static Task ExecuteSavepointAsync(string command, string savepointName, IOBehavior ioBehavior, CancellationToken cancellationToken)
 	{
 		throw new SingleStoreConnector.SingleStoreException("Feature 'SAVEPOINT' is not supported by SingleStore");
 
@@ -219,7 +223,7 @@ public sealed class SingleStoreTransaction : DbTransaction
 #if NETCOREAPP3_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
 		return default;
 #else
-		return Utility.CompletedTask;
+		return Task.CompletedTask;
 #endif
 	}
 
@@ -285,5 +289,5 @@ public sealed class SingleStoreTransaction : DbTransaction
 
 	private static string QuoteIdentifier(string identifier) => "`" + identifier.Replace("`", "``") + "`";
 
-	bool m_isDisposed;
+	private bool m_isDisposed;
 }

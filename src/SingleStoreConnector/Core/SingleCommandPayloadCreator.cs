@@ -13,7 +13,7 @@ internal sealed class SingleCommandPayloadCreator : ICommandPayloadCreator
 	// with this as the first column name, the result set will be treated as 'out' parameters for the previous command.
 	public static string OutParameterSentinelColumnName => "\uE001\b\x0B";
 
-	public bool WriteQueryCommand(ref CommandListPosition commandListPosition, IDictionary<string, CachedProcedure?> cachedProcedures, ByteBufferWriter writer)
+	public bool WriteQueryCommand(ref CommandListPosition commandListPosition, IDictionary<string, CachedProcedure?> cachedProcedures, ByteBufferWriter writer, bool appendSemicolon)
 	{
 		if (commandListPosition.CommandIndex == commandListPosition.Commands.Count)
 			return false;
@@ -44,7 +44,7 @@ internal sealed class SingleCommandPayloadCreator : ICommandPayloadCreator
 				Log.Warn("Session{0} has query attributes but server doesn't support them; CommandText: {1}", command.Connection!.Session.Id, command.CommandText);
 			}
 
-			WriteQueryPayload(command, cachedProcedures, writer);
+			WriteQueryPayload(command, cachedProcedures, writer, appendSemicolon);
 
 			commandListPosition.CommandIndex++;
 		}
@@ -69,9 +69,10 @@ internal sealed class SingleCommandPayloadCreator : ICommandPayloadCreator
 	/// <param name="command">The command.</param>
 	/// <param name="cachedProcedures">The cached procedures.</param>
 	/// <param name="writer">The output writer.</param>
+	/// <param name="appendSemicolon">Whether a statement-separating semicolon should be appended if it's missing.</param>
 	/// <returns><c>true</c> if a complete command was written; otherwise, <c>false</c>.</returns>
-	public static bool WriteQueryPayload(ISingleStoreCommand command, IDictionary<string, CachedProcedure?> cachedProcedures, ByteBufferWriter writer) =>
-		(command.CommandType == CommandType.StoredProcedure) ? WriteStoredProcedure(command, cachedProcedures, writer) : WriteCommand(command, writer);
+	public static bool WriteQueryPayload(ISingleStoreCommand command, IDictionary<string, CachedProcedure?> cachedProcedures, ByteBufferWriter writer, bool appendSemicolon) =>
+		(command.CommandType == CommandType.StoredProcedure) ? WriteStoredProcedure(command, cachedProcedures, writer) : WriteCommand(command, writer, appendSemicolon);
 
 	private static void WritePreparedStatement(ISingleStoreCommand command, PreparedStatement preparedStatement, ByteBufferWriter writer)
 	{
@@ -115,12 +116,12 @@ internal sealed class SingleCommandPayloadCreator : ICommandPayloadCreator
 			var parameters = new SingleStoreParameter[commandParameterCount + attributeCount];
 			for (var i = 0; i < commandParameterCount; i++)
 			{
-				var parameterName = preparedStatement.Statement.ParameterNames![i];
-				var parameterIndex = parameterName is not null ? (parameterCollection?.NormalizedIndexOf(parameterName) ?? -1) : preparedStatement.Statement.ParameterIndexes[i];
+				var parameterName = preparedStatement.Statement.NormalizedParameterNames![i];
+				var parameterIndex = parameterName is not null ? (parameterCollection?.UnsafeIndexOf(parameterName) ?? -1) : preparedStatement.Statement.ParameterIndexes[i];
 				if (parameterIndex == -1 && parameterName is not null)
-					throw new SingleStoreException("Parameter '{0}' must be defined.".FormatInvariant(parameterName));
+					throw new SingleStoreException($"Parameter '{preparedStatement.Statement.ParameterNames![i]}' must be defined.");
 				else if (parameterIndex < 0 || parameterIndex >= (parameterCollection?.Count ?? 0))
-					throw new SingleStoreException("Parameter index {0} is invalid when only {1} parameter{2} defined.".FormatInvariant(parameterIndex, parameterCollection?.Count ?? 0, parameterCollection?.Count == 1 ? " is" : "s are"));
+					throw new SingleStoreException($"Parameter index {parameterIndex} is invalid when only {parameterCollection?.Count ?? 0} parameter{(parameterCollection?.Count == 1 ? " is" : "s are")} defined.");
 				parameters[i] = parameterCollection![parameterIndex];
 			}
 			for (var i = 0; i < attributeCount; i++)
@@ -242,29 +243,29 @@ internal sealed class SingleCommandPayloadCreator : ICommandPayloadCreator
 		return preparer.ParseAndBindParameters(writer);
 	}
 
-	private static bool WriteCommand(ISingleStoreCommand command, ByteBufferWriter writer)
+	private static bool WriteCommand(ISingleStoreCommand command, ByteBufferWriter writer, bool appendSemicolon)
 	{
 		var isSchemaOnly = (command.CommandBehavior & CommandBehavior.SchemaOnly) != 0;
 		var isSingleRow = (command.CommandBehavior & CommandBehavior.SingleRow) != 0;
 		if (isSchemaOnly)
 		{
-			ReadOnlySpan<byte> setSqlSelectLimit0 = new byte[] { 83, 69, 84, 32, 115, 113, 108, 95, 115, 101, 108, 101, 99, 116, 95, 108, 105, 109, 105, 116, 61, 48, 59, 10 }; // SET sql_select_limit=0;\n
+			ReadOnlySpan<byte> setSqlSelectLimit0 = "SET sql_select_limit=0;\n"u8;
 			writer.Write(setSqlSelectLimit0);
 		}
 		else if (isSingleRow)
 		{
-			ReadOnlySpan<byte> setSqlSelectLimit1 = new byte[] { 83, 69, 84, 32, 115, 113, 108, 95, 115, 101, 108, 101, 99, 116, 95, 108, 105, 109, 105, 116, 61, 49, 59, 10 }; // SET sql_select_limit=1;\n
+			ReadOnlySpan<byte> setSqlSelectLimit1 = "SET sql_select_limit=1;\n"u8;
 			writer.Write(setSqlSelectLimit1);
 		}
-		var preparer = new StatementPreparer(command.CommandText!, command.RawParameters, command.CreateStatementPreparerOptions());
+		var preparer = new StatementPreparer(command.CommandText!, command.RawParameters, command.CreateStatementPreparerOptions() | ((appendSemicolon || isSchemaOnly || isSingleRow) ? StatementPreparerOptions.AppendSemicolon : StatementPreparerOptions.None));
 		var isComplete = preparer.ParseAndBindParameters(writer);
 		if (isComplete && (isSchemaOnly || isSingleRow))
 		{
-			ReadOnlySpan<byte> clearSqlSelectLimit = new byte[] { 10, 83, 69, 84, 32, 115, 113, 108, 95, 115, 101, 108, 101, 99, 116, 95, 108, 105, 109, 105, 116, 61, 100, 101, 102, 97, 117, 108, 116, 59 }; // \nSET sql_select_limit=default;
+			ReadOnlySpan<byte> clearSqlSelectLimit = "\nSET sql_select_limit=default;"u8;
 			writer.Write(clearSqlSelectLimit);
 		}
 		return isComplete;
 	}
 
-	static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleCommandPayloadCreator));
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleCommandPayloadCreator));
 }

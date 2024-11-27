@@ -3,17 +3,17 @@ namespace SingleStoreConnector.Core;
 internal interface ILoadBalancer
 {
 	/// <summary>
-	/// Returns an <see cref="IEnumerable{String}"/> containing <paramref name="hosts"/> in the order they
+	/// Returns an <see cref="IReadOnlyList{String}"/> containing <paramref name="hosts"/> in the order they
 	/// should be tried to satisfy the load balancing policy.
 	/// </summary>
-	IEnumerable<string> LoadBalance(IReadOnlyList<string> hosts);
+	IReadOnlyList<string> LoadBalance(IReadOnlyList<string> hosts);
 }
 
 internal sealed class FailOverLoadBalancer : ILoadBalancer
 {
 	public static ILoadBalancer Instance { get; } = new FailOverLoadBalancer();
 
-	public IEnumerable<string> LoadBalance(IReadOnlyList<string> hosts) => hosts;
+	public IReadOnlyList<string> LoadBalance(IReadOnlyList<string> hosts) => hosts;
 
 	private FailOverLoadBalancer()
 	{
@@ -24,8 +24,9 @@ internal sealed class RandomLoadBalancer : ILoadBalancer
 {
 	public static ILoadBalancer Instance { get; } = new RandomLoadBalancer();
 
-	public IEnumerable<string> LoadBalance(IReadOnlyList<string> hosts)
+	public IReadOnlyList<string> LoadBalance(IReadOnlyList<string> hosts)
 	{
+#pragma warning disable CA5394 // Do not use insecure randomness
 		// from https://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle#The_modern_algorithm
 		var shuffled = new List<string>(hosts);
 		for (var i = hosts.Count - 1; i >= 1; i--)
@@ -45,14 +46,14 @@ internal sealed class RandomLoadBalancer : ILoadBalancer
 
 	private RandomLoadBalancer() => m_random = new();
 
-	readonly Random m_random;
+	private readonly Random m_random;
 }
 
 internal sealed class RoundRobinLoadBalancer : ILoadBalancer
 {
 	public RoundRobinLoadBalancer() => m_lock = new();
 
-	public IEnumerable<string> LoadBalance(IReadOnlyList<string> hosts)
+	public IReadOnlyList<string> LoadBalance(IReadOnlyList<string> hosts)
 	{
 		int start;
 		lock (m_lock)
@@ -66,6 +67,6 @@ internal sealed class RoundRobinLoadBalancer : ILoadBalancer
 		return shuffled;
 	}
 
-	readonly object m_lock;
-	uint m_counter;
+	private readonly object m_lock;
+	private uint m_counter;
 }

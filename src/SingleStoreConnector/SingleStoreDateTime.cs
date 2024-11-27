@@ -1,5 +1,7 @@
 namespace SingleStoreConnector;
 
+#pragma warning disable CA2225 // Operator overloads have named alternates
+
 /// <summary>
 /// Represents a SingleStore date/time value. This type can be used to store <c>DATETIME</c> values such
 /// as <c>0000-00-00</c> that can be stored in SingleStore (when <see cref="SingleStoreConnectionStringBuilder.AllowZeroDateTime"/>
@@ -112,7 +114,9 @@ public struct SingleStoreDateTime : IComparable, IComparable<SingleStoreDateTime
 	/// <summary>
 	/// Converts this object to a <see cref="string"/>.
 	/// </summary>
+#pragma warning disable CA1305 // Specify IFormatProvider
 	public readonly override string ToString() => IsValidDateTime ? GetDateTime().ToString() : "0000-00-00";
+#pragma warning restore CA1305 // Specify IFormatProvider
 
 	/// <summary>
 	/// Converts this object to a <see cref="DateTime"/>.

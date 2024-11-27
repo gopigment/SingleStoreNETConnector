@@ -8,7 +8,7 @@ internal sealed class BatchedCommandPayloadCreator : ICommandPayloadCreator
 {
 	public static ICommandPayloadCreator Instance { get; } = new BatchedCommandPayloadCreator();
 
-	public bool WriteQueryCommand(ref CommandListPosition commandListPosition, IDictionary<string, CachedProcedure?> cachedProcedures, ByteBufferWriter writer)
+	public bool WriteQueryCommand(ref CommandListPosition commandListPosition, IDictionary<string, CachedProcedure?> cachedProcedures, ByteBufferWriter writer, bool appendSemicolon)
 	{
 		writer.Write((byte) CommandKind.Multi);
 		bool? firstResult = default;
@@ -20,14 +20,14 @@ internal sealed class BatchedCommandPayloadCreator : ICommandPayloadCreator
 			var position = writer.Position;
 			writer.Write(padding);
 
-			wroteCommand = SingleCommandPayloadCreator.Instance.WriteQueryCommand(ref commandListPosition, cachedProcedures, writer);
+			wroteCommand = SingleCommandPayloadCreator.Instance.WriteQueryCommand(ref commandListPosition, cachedProcedures, writer, appendSemicolon);
 			firstResult ??= wroteCommand;
 
 			// write command length
 			var commandLength = writer.Position - position - padding.Length;
-			var span = writer.ArraySegment.AsSpan().Slice(position);
+			var span = writer.ArraySegment.AsSpan(position);
 			span[0] = 0xFE;
-			BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(1), (ulong) commandLength);
+			BinaryPrimitives.WriteUInt64LittleEndian(span[1..], (ulong) commandLength);
 		} while (wroteCommand);
 
 		// remove the padding that was saved for the final command (which wasn't written)

@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.ExceptionServices;
+using SingleStoreConnector.Logging;
 using SingleStoreConnector.Protocol;
 using SingleStoreConnector.Protocol.Payloads;
 using SingleStoreConnector.Protocol.Serialization;
@@ -85,7 +86,7 @@ internal sealed class ResultSet
 							try
 							{
 								int byteCount;
-								while ((byteCount = await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0)
+								while ((byteCount = await stream.ReadAsync(buffer, 0, buffer.Length, CancellationToken.None).ConfigureAwait(false)) > 0)
 								{
 									payload = new(new ArraySegment<byte>(buffer, 0, byteCount));
 									await Session.SendReplyAsync(payload, ioBehavior, CancellationToken.None).ConfigureAwait(false);
@@ -103,7 +104,7 @@ internal sealed class ResultSet
 							break;
 
 						default:
-							throw new InvalidOperationException("Unsupported Source type: {0}".FormatInvariant(source.GetType().Name));
+							throw new InvalidOperationException($"Unsupported Source type: {source.GetType().Name}");
 						}
 					}
 					catch (Exception ex)
@@ -140,7 +141,7 @@ internal sealed class ResultSet
 						// 'Session.ReceiveReplyAsync' reuses a shared buffer; make a copy so that the column definitions can always be safely read at any future point
 						if (m_columnDefinitionPayloadUsedBytes + payloadLength > m_columnDefinitionPayloads.Count)
 							Utility.Resize(ref m_columnDefinitionPayloads, m_columnDefinitionPayloadUsedBytes + payloadLength);
-						payload.Span.CopyTo(m_columnDefinitionPayloads.Array.AsSpan().Slice(m_columnDefinitionPayloadUsedBytes));
+						payload.Span.CopyTo(m_columnDefinitionPayloads.AsSpan(m_columnDefinitionPayloadUsedBytes));
 
 						var columnDefinition = ColumnDefinitionPayload.Create(new ResizableArraySegment<byte>(m_columnDefinitionPayloads, m_columnDefinitionPayloadUsedBytes, payloadLength));
 						ColumnDefinitions[column] = columnDefinition;
@@ -230,7 +231,6 @@ internal sealed class ResultSet
 		if (BufferState is ResultSetState.HasMoreData or ResultSetState.NoMoreData or ResultSetState.None)
 			return new ValueTask<Row?>(default(Row?));
 
-		using var registration = Command.CancellableCommand.RegisterCancel(cancellationToken);
 		var payloadValueTask = Session.ReceiveReplyAsync(ioBehavior, CancellationToken.None);
 		return payloadValueTask.IsCompletedSuccessfully
 			? new ValueTask<Row?>(ScanRowAsyncRemainder(this, payloadValueTask.Result, row))
@@ -250,6 +250,8 @@ internal sealed class ResultSet
 					throw new OperationCanceledException(ex.Message, ex, token);
 				if (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted && resultSet.Command.CancellableCommand.IsTimedOut)
 					throw SingleStoreException.CreateForTimeout(ex);
+				if (ex.ErrorCode == SingleStoreErrorCode.QueryInterrupted)
+					Log.Trace("Got QueryInterrupted exception, but not because of the CommandTimeout or CancellationToken (ResultSet.cs)");
 				throw;
 			}
 			return ScanRowAsyncRemainder(resultSet, payloadData, row);
@@ -286,12 +288,14 @@ internal sealed class ResultSet
 	public int Depth => 0;
 #pragma warning restore CA1822 // Mark members as static
 
+#pragma warning disable CA2201 // Do not raise reserved exception types (IndexOutOfRangeException)
+
 	public string GetName(int ordinal)
 	{
 		if (ColumnDefinitions is null)
 			throw new InvalidOperationException("There is no current result set.");
 		if (ordinal < 0 || ordinal >= ColumnDefinitions.Length)
-			throw new IndexOutOfRangeException("value must be between 0 and {0}".FormatInvariant(ColumnDefinitions.Length - 1));
+			throw new IndexOutOfRangeException($"value must be between 0 and {ColumnDefinitions.Length - 1}");
 		return ColumnDefinitions[ordinal].Name;
 	}
 
@@ -300,7 +304,7 @@ internal sealed class ResultSet
 		if (ColumnDefinitions is null)
 			throw new InvalidOperationException("There is no current result set.");
 		if (ordinal < 0 || ordinal >= ColumnDefinitions.Length)
-			throw new IndexOutOfRangeException("value must be between 0 and {0}.".FormatInvariant(ColumnDefinitions.Length));
+			throw new IndexOutOfRangeException($"value must be between 0 and {ColumnDefinitions.Length - 1}");
 
 		var mySqlDbType = ColumnTypes![ordinal];
 		if (mySqlDbType == SingleStoreDbType.String)
@@ -313,7 +317,7 @@ internal sealed class ResultSet
 		if (ColumnDefinitions is null)
 			throw new InvalidOperationException("There is no current result set.");
 		if (ordinal < 0 || ordinal >= ColumnDefinitions.Length)
-			throw new IndexOutOfRangeException("value must be between 0 and {0}.".FormatInvariant(ColumnDefinitions.Length));
+			throw new IndexOutOfRangeException($"value must be between 0 and {ColumnDefinitions.Length - 1}");
 
 		var type = TypeMapper.Instance.GetColumnTypeMetadata(ColumnTypes![ordinal]).DbTypeMapping.ClrType;
 		if (Connection.AllowZeroDateTime && type == typeof(DateTime))
@@ -346,7 +350,7 @@ internal sealed class ResultSet
 				return column;
 		}
 
-		throw new IndexOutOfRangeException("The column name '{0}' does not exist in the result set.".FormatInvariant(name));
+		throw new IndexOutOfRangeException($"The column name '{name}' does not exist in the result set.");
 	}
 
 	public Row GetCurrentRow()
@@ -356,6 +360,7 @@ internal sealed class ResultSet
 		return m_row ?? throw new InvalidOperationException("There is no current row.");
 	}
 
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(ResultSet));
 	public SingleStoreDataReader DataReader { get; }
 	public ExceptionDispatchInfo? ReadResultSetHeaderException { get; private set; }
 	public ISingleStoreCommand Command => DataReader.Command!;
@@ -369,9 +374,9 @@ internal sealed class ResultSet
 	public ResultSetState State { get; private set; }
 	public bool ContainsCommandParameters { get; private set; }
 
-	ResizableArray<byte>? m_columnDefinitionPayloads;
-	int m_columnDefinitionPayloadUsedBytes;
-	Queue<Row>? m_readBuffer;
-	Row? m_row;
-	bool m_hasRows;
+	private ResizableArray<byte>? m_columnDefinitionPayloads;
+	private int m_columnDefinitionPayloadUsedBytes;
+	private Queue<Row>? m_readBuffer;
+	private Row? m_row;
+	private bool m_hasRows;
 }

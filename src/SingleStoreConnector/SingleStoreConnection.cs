@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -12,13 +13,17 @@ using SingleStoreConnector.Utilities;
 
 namespace SingleStoreConnector;
 
+#if !NET6_0_OR_GREATER
+#pragma warning disable CA1822 // Mark members as static
+#endif
+
 /// <summary>
 /// <see cref="SingleStoreConnection"/> represents a connection to a SingleStore database.
 /// </summary>
 public sealed class SingleStoreConnection : DbConnection, ICloneable
 {
 	public SingleStoreConnection()
-		: this(default)
+		: this("")
 	{
 	}
 
@@ -27,6 +32,14 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		GC.SuppressFinalize(this);
 		m_connectionString = connectionString ?? "";
 	}
+
+#if NET7_0_OR_GREATER
+	internal SingleStoreConnection(SingleStoreDataSource dataSource)
+		: this(dataSource.ConnectionString)
+	{
+		m_dataSource = dataSource;
+	}
+#endif
 
 #pragma warning disable CA2012 // Safe because method completes synchronously
 	/// <summary>
@@ -172,7 +185,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 			throw new InvalidOperationException("Connection is not open.");
 
 		// ignore reenlistment of same connection in same transaction
-		if (m_enlistedTransaction?.Transaction.Equals(transaction) ?? false)
+		if (m_enlistedTransaction?.Transaction.Equals(transaction) is true)
 			return;
 
 		if (m_enlistedTransaction is not null)
@@ -379,7 +392,11 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 
 			SetState(ConnectionState.Connecting);
 
-			var pool = ConnectionPool.GetPool(m_connectionString);
+			var pool =
+#if NET7_0_OR_GREATER
+				m_dataSource?.Pool ??
+#endif
+				ConnectionPool.GetPool(m_connectionString);
 			m_connectionSettings ??= pool?.ConnectionSettings ?? new ConnectionSettings(new SingleStoreConnectionStringBuilder(m_connectionString));
 
 			// check if there is an open session (in the current transaction) that can be adopted
@@ -389,7 +406,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 				if (existingConnection is not null)
 				{
 					TakeSessionFrom(existingConnection);
-					CopyActivityTags(m_session!, activity);
+					ActivitySourceHelper.CopyTags(m_session!.ActivityTags, activity);
 					m_hasBeenOpened = true;
 					SetState(ConnectionState.Open);
 					return;
@@ -398,9 +415,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 
 			try
 			{
-				m_session = await CreateSessionAsync(pool, openStartTickCount, ioBehavior, cancellationToken).ConfigureAwait(false);
-				CopyActivityTags(m_session, activity);
-
+				m_session = await CreateSessionAsync(pool, openStartTickCount, activity, ioBehavior, cancellationToken).ConfigureAwait(false);
 				m_hasBeenOpened = true;
 				SetState(ConnectionState.Open);
 			}
@@ -434,15 +449,6 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 			activity.SetException(ex);
 			throw;
 		}
-
-		static void CopyActivityTags(ServerSession session, Activity? activity)
-		{
-			if (activity is { IsAllDataRequested: true })
-			{
-				foreach (var tag in session.ActivityTags)
-					activity.SetTag(tag.Key, tag.Value);
-			}
-		}
 	}
 
 	/// <summary>
@@ -454,13 +460,9 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 	/// It's known to be supported by MySQL Server 5.7.3 (and later), MariaDB 10.2.4 (and later),
 	/// SingleStore 7.5 and later. Calling this for SingleStore 7.5 and 7.6 resets the connection to no database selected.
 	/// Other MySQL-compatible servers or proxies may not support this command.</remarks>
-#if NETCOREAPP2_1_OR_GREATER || NETSTANDARD2_1_OR_GREATER
 	public async ValueTask ResetConnectionAsync(CancellationToken cancellationToken = default)
-#else
-	public async Task ResetConnectionAsync(CancellationToken cancellationToken = default)
-#endif
 	{
-		await Session.ResetConnectionAsync(AsyncIOBehavior, cancellationToken, Database);
+		await Session.ResetConnectionAsync(AsyncIOBehavior, Database, cancellationToken).ConfigureAwait(false);
 	}
 
 	[AllowNull]
@@ -576,22 +578,22 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 	/// Returns schema information for the data source of this <see cref="SingleStoreConnection"/>.
 	/// </summary>
 	/// <returns>A <see cref="DataTable"/> containing schema information.</returns>
-	public override DataTable GetSchema() => GetSchemaProvider().GetSchemaAsync(IOBehavior.Synchronous, default).GetAwaiter().GetResult();
+	public override DataTable GetSchema() => GetSchemaProvider().GetSchemaAsync(IOBehavior.Synchronous, "MetaDataCollections", default, default).GetAwaiter().GetResult();
 
 	/// <summary>
 	/// Returns schema information for the data source of this <see cref="SingleStoreConnection"/>.
 	/// </summary>
 	/// <param name="collectionName">The name of the schema to return.</param>
 	/// <returns>A <see cref="DataTable"/> containing schema information.</returns>
-	public override DataTable GetSchema(string collectionName) => GetSchemaProvider().GetSchemaAsync(IOBehavior.Synchronous, collectionName, default).GetAwaiter().GetResult();
+	public override DataTable GetSchema(string collectionName) => GetSchemaProvider().GetSchemaAsync(IOBehavior.Synchronous, collectionName, default, default).GetAwaiter().GetResult();
 
 	/// <summary>
 	/// Returns schema information for the data source of this <see cref="SingleStoreConnection"/>.
 	/// </summary>
 	/// <param name="collectionName">The name of the schema to return.</param>
-	/// <param name="restrictionValues">The restrictions to apply to the schema; this parameter is currently ignored.</param>
+	/// <param name="restrictionValues">The restrictions to apply to the schema.</param>
 	/// <returns>A <see cref="DataTable"/> containing schema information.</returns>
-	public override DataTable GetSchema(string collectionName, string?[] restrictionValues) => GetSchemaProvider().GetSchemaAsync(IOBehavior.Synchronous, collectionName, default).GetAwaiter().GetResult();
+	public override DataTable GetSchema(string collectionName, string?[] restrictionValues) => GetSchemaProvider().GetSchemaAsync(IOBehavior.Synchronous, collectionName, restrictionValues, default).GetAwaiter().GetResult();
 #pragma warning restore CA2012
 
 	/// <summary>
@@ -605,7 +607,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 #else
 	public Task<DataTable> GetSchemaAsync(CancellationToken cancellationToken = default)
 #endif
-		=> GetSchemaProvider().GetSchemaAsync(AsyncIOBehavior, cancellationToken).AsTask();
+		=> GetSchemaProvider().GetSchemaAsync(AsyncIOBehavior,  "MetaDataCollections", default, cancellationToken).AsTask();
 
 	/// <summary>
 	/// Asynchronously returns schema information for the data source of this <see cref="SingleStoreConnection"/>.
@@ -619,13 +621,13 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 #else
 	public Task<DataTable> GetSchemaAsync(string collectionName, CancellationToken cancellationToken = default)
 #endif
-		=> GetSchemaProvider().GetSchemaAsync(AsyncIOBehavior, collectionName, cancellationToken).AsTask();
+		=> GetSchemaProvider().GetSchemaAsync(AsyncIOBehavior, collectionName, default, cancellationToken).AsTask();
 
 	/// <summary>
 	/// Asynchronously returns schema information for the data source of this <see cref="SingleStoreConnection"/>.
 	/// </summary>
 	/// <param name="collectionName">The name of the schema to return.</param>
-	/// <param name="restrictionValues">The restrictions to apply to the schema; this parameter is currently ignored.</param>
+	/// <param name="restrictionValues">The restrictions to apply to the schema.</param>
 	/// <param name="cancellationToken">A token to cancel the asynchronous operation.</param>
 	/// <returns>A <see cref="Task{DataTable}"/> containing schema information.</returns>
 	/// <remarks>The proposed ADO.NET API that this is based on is not finalized; this API may change in the future.</remarks>
@@ -634,7 +636,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 #else
 	public Task<DataTable> GetSchemaAsync(string collectionName, string?[] restrictionValues, CancellationToken cancellationToken = default)
 #endif
-		=> GetSchemaProvider().GetSchemaAsync(AsyncIOBehavior, collectionName, cancellationToken).AsTask();
+		=> GetSchemaProvider().GetSchemaAsync(AsyncIOBehavior, collectionName, restrictionValues, cancellationToken).AsTask();
 
 	private SchemaProvider GetSchemaProvider() => m_schemaProvider ??= new(this);
 
@@ -687,6 +689,11 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		finally
 		{
 			m_isDisposed = true;
+
+			// Component implements the Dispose pattern, with some core logic implemented in Dispose(bool disposing). DbConnection
+			// adds DisposeAsync but doesn't implement the full DisposeAsyncCore pattern. Thus, although DisposeAsync is supposed
+			// to call Dispose(false), we call Dispose(true) here to execute that base class logic in both the sync and async paths.
+			base.Dispose(true);
 		}
 	}
 
@@ -694,6 +701,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 	{
 		ProvideClientCertificatesCallback = ProvideClientCertificatesCallback,
 		ProvidePasswordCallback = ProvidePasswordCallback,
+		RemoteCertificateValidationCallback = RemoteCertificateValidationCallback,
 	};
 
 	object ICloneable.Clone() => Clone();
@@ -718,6 +726,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		{
 			ProvideClientCertificatesCallback = ProvideClientCertificatesCallback,
 			ProvidePasswordCallback = ProvidePasswordCallback,
+			RemoteCertificateValidationCallback = RemoteCertificateValidationCallback,
 		};
 	}
 
@@ -727,8 +736,10 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		{
 			VerifyNotDisposed();
 			if (m_session is null || State != ConnectionState.Open)
+			{
 				throw new InvalidOperationException(
 					"Connection must be Open; current state is {0}, m_session is {1}".FormatInvariant(State, m_session?.Id));
+			}
 			return m_session;
 		}
 	}
@@ -737,13 +748,13 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 
 	internal void Cancel(ICancellableCommand command, int commandId, bool isCancel)
 	{
-		if (m_session is null || State != ConnectionState.Open || !m_session.TryStartCancel(command))
+		if (m_session?.Id is not string sessionId || State != ConnectionState.Open || m_session?.TryStartCancel(command) is not true)
 		{
 			Log.Trace("Ignoring cancellation for closed connection or invalid CommandId {0}", commandId);
 			return;
 		}
 
-		Log.Debug("CommandId {0} for Session{1} has been canceled via {2}.", commandId, m_session.Id, isCancel ? "Cancel()" : "command timeout");
+		Log.Debug("CommandId {0} for Session{1} has been canceled via {2}.", commandId, sessionId, isCancel ? "Cancel()" : "command timeout");
 
 		try
 		{
@@ -753,29 +764,38 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 				AutoEnlist = false,
 				Pooling = false,
 			};
-			if (m_session.IPAddress is not null)
-				csb.Server = m_session.IPAddress.ToString();
+			if (m_session.IPEndPoint is { Address: { } ipAddress, Port: { } port } )
+			{
+				csb.Server = ipAddress.ToString();
+				csb.Port = (uint) port;
+			}
+			csb.UserID = m_session.UserID;
 			var cancellationTimeout = GetConnectionSettings().CancellationTimeout;
 			csb.ConnectionTimeout = cancellationTimeout < 1 ? 3u : (uint) cancellationTimeout;
 
-			using var connection = new SingleStoreConnection(csb.ConnectionString);
+			using var connection = CloneWith(csb.ConnectionString);
 			connection.Open();
-			using var killCommand = new SingleStoreCommand("KILL QUERY {0}".FormatInvariant(command.Connection!.ServerThread), connection);
+#if NET6_0_OR_GREATER
+			var killQuerySql = string.Create(CultureInfo.InvariantCulture, $"KILL QUERY {command.Connection!.ServerThread} {m_session.AggregatorId}");
+#else
+			var killQuerySql = FormattableString.Invariant($"KILL QUERY {command.Connection!.ServerThread} {m_session.AggregatorId}");
+#endif
+			using var killCommand = new SingleStoreCommand(killQuerySql, connection);
 			killCommand.CommandTimeout = cancellationTimeout < 1 ? 3 : cancellationTimeout;
-			m_session.DoCancel(command, killCommand);
+			m_session?.DoCancel(command, killCommand);
 		}
 		catch (InvalidOperationException ex)
 		{
 			// ignore a rare race condition where the connection is open at the beginning of the method, but closed by the time
 			// KILL QUERY is executed: https://github.com/mysql-net/MySqlConnector/issues/1002
-			Log.Info(ex, "Session{0} ignoring cancellation for closed connection.", m_session!.Id);
-			m_session.AbortCancel(command);
+			Log.Info(ex, "Session{0} ignoring cancellation for closed connection.", sessionId);
+			m_session?.AbortCancel(command);
 		}
 		catch (SingleStoreException ex)
 		{
 			// cancelling the query failed; setting the state back to 'Querying' will allow another call to 'Cancel' to try again
-			Log.Info(ex, "Session{0} cancelling CommandId {1} failed", m_session!.Id, command.CommandId);
-			m_session.AbortCancel(command);
+			Log.Info(ex, "Session{0} cancelling CommandId {1} failed", sessionId, command.CommandId);
+			m_session?.AbortCancel(command);
 		}
 	}
 
@@ -850,7 +870,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 	internal IOBehavior AsyncIOBehavior => GetConnectionSettings().ForceSynchronous ? IOBehavior.Synchronous : IOBehavior.Asynchronous;
 
 	// Defaults to IOBehavior.Synchronous if the connection hasn't been opened yet; only use if it's a no-op for a closed connection.
-	internal IOBehavior SimpleAsyncIOBehavior => (m_connectionSettings?.ForceSynchronous ?? false) ? IOBehavior.Synchronous : IOBehavior.Asynchronous;
+	internal IOBehavior SimpleAsyncIOBehavior => (m_connectionSettings?.ForceSynchronous is true) ? IOBehavior.Synchronous : IOBehavior.Asynchronous;
 
 	internal SingleStoreSslMode SslMode => GetInitializedConnectionSettings().SslMode;
 
@@ -887,7 +907,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		}
 	}
 
-	private async ValueTask<ServerSession> CreateSessionAsync(ConnectionPool? pool, int startTickCount, IOBehavior? ioBehavior, CancellationToken cancellationToken)
+	private async ValueTask<ServerSession> CreateSessionAsync(ConnectionPool? pool, int startTickCount, Activity? activity, IOBehavior? ioBehavior, CancellationToken cancellationToken)
 	{
 		var connectionSettings = GetInitializedConnectionSettings();
 		var actualIOBehavior = ioBehavior ?? (connectionSettings.ForceSynchronous ? IOBehavior.Synchronous : IOBehavior.Asynchronous);
@@ -908,7 +928,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 			if (pool is not null)
 			{
 				// this returns an open session
-				return await pool.GetSessionAsync(this, startTickCount, actualIOBehavior, connectToken).ConfigureAwait(false);
+				return await pool.GetSessionAsync(this, startTickCount, connectionSettings.ConnectionTimeoutMilliseconds, activity, actualIOBehavior, connectToken).ConfigureAwait(false);
 			}
 			else
 			{
@@ -919,16 +939,24 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 				var session = new ServerSession();
 				session.OwningConnection = new WeakReference<SingleStoreConnection>(this);
 				Log.Debug("Created new non-pooled Session{0}", session.Id);
-				await session.ConnectAsync(connectionSettings, this, startTickCount, loadBalancer, actualIOBehavior, connectToken).ConfigureAwait(false);
-				return session;
+				try
+				{
+					await session.ConnectAsync(connectionSettings, this, startTickCount, loadBalancer, activity, actualIOBehavior, connectToken).ConfigureAwait(false);
+					return session;
+				}
+				catch (Exception)
+				{
+					await session.DisposeAsync(actualIOBehavior, default).ConfigureAwait(false);
+					throw;
+				}
 			}
 		}
-		catch (OperationCanceledException) when (timeoutSource?.IsCancellationRequested ?? false)
+		catch (OperationCanceledException) when (timeoutSource?.IsCancellationRequested is true)
 		{
-			var messageSuffix = (pool?.IsEmpty ?? false) ? " All pooled connections are in use." : "";
+			var messageSuffix = (pool?.IsEmpty is true) ? " All pooled connections are in use." : "";
 			throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, "Connect Timeout expired." + messageSuffix);
 		}
-		catch (SingleStoreException ex) when ((timeoutSource?.IsCancellationRequested ?? false) || (ex.ErrorCode == SingleStoreErrorCode.CommandTimeoutExpired))
+		catch (SingleStoreException ex) when ((timeoutSource?.IsCancellationRequested is true) || (ex.ErrorCode == SingleStoreErrorCode.CommandTimeoutExpired))
 		{
 			throw new SingleStoreException(SingleStoreErrorCode.UnableToConnectToHost, "Connect Timeout expired.", ex);
 		}
@@ -982,7 +1010,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		if (m_activeReader is null &&
 			CurrentTransaction is null &&
 			m_enlistedTransaction is null &&
-			(m_connectionSettings?.Pooling ?? false))
+			(m_connectionSettings?.Pooling is true))
 		{
 			m_cachedProcedures = null;
 			if (m_session is not null)
@@ -1069,11 +1097,7 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 		}
 	}
 
-#if NETCOREAPP2_1_OR_GREATER || NETSTANDARD2_1_OR_GREATER
 	private async ValueTask CloseDatabaseAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
-#else
-	private async Task CloseDatabaseAsync(IOBehavior ioBehavior, CancellationToken cancellationToken)
-#endif
 	{
 		if (m_activeReader is not null)
 			await m_activeReader.DisposeAsync(ioBehavior, cancellationToken).ConfigureAwait(false);
@@ -1090,21 +1114,24 @@ public sealed class SingleStoreConnection : DbConnection, ICloneable
 	// This method may be called when it's known that the connection settings have been initialized.
 	private ConnectionSettings GetInitializedConnectionSettings() => m_connectionSettings!;
 
-	static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleStoreConnection));
-	static readonly StateChangeEventArgs s_stateChangeClosedConnecting = new(ConnectionState.Closed, ConnectionState.Connecting);
-	static readonly StateChangeEventArgs s_stateChangeConnectingOpen = new(ConnectionState.Connecting, ConnectionState.Open);
-	static readonly StateChangeEventArgs s_stateChangeOpenClosed = new(ConnectionState.Open, ConnectionState.Closed);
-	static readonly object s_lock = new();
-	static readonly Dictionary<System.Transactions.Transaction, List<EnlistedTransactionBase>> s_transactionConnections = new();
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(SingleStoreConnection));
+	private static readonly StateChangeEventArgs s_stateChangeClosedConnecting = new(ConnectionState.Closed, ConnectionState.Connecting);
+	private static readonly StateChangeEventArgs s_stateChangeConnectingOpen = new(ConnectionState.Connecting, ConnectionState.Open);
+	private static readonly StateChangeEventArgs s_stateChangeOpenClosed = new(ConnectionState.Open, ConnectionState.Closed);
+	private static readonly object s_lock = new();
+	private static readonly Dictionary<System.Transactions.Transaction, List<EnlistedTransactionBase>> s_transactionConnections = new();
 
-	string m_connectionString;
-	ConnectionSettings? m_connectionSettings;
-	ServerSession? m_session;
-	ConnectionState m_connectionState;
-	bool m_hasBeenOpened;
-	bool m_isDisposed;
-	Dictionary<string, CachedProcedure?>? m_cachedProcedures;
-	SchemaProvider? m_schemaProvider;
-	SingleStoreDataReader? m_activeReader;
-	EnlistedTransactionBase? m_enlistedTransaction;
+#if NET7_0_OR_GREATER
+	private readonly SingleStoreDataSource? m_dataSource;
+#endif
+	private string m_connectionString;
+	private ConnectionSettings? m_connectionSettings;
+	private ServerSession? m_session;
+	private ConnectionState m_connectionState;
+	private bool m_hasBeenOpened;
+	private bool m_isDisposed;
+	private Dictionary<string, CachedProcedure?>? m_cachedProcedures;
+	private SchemaProvider? m_schemaProvider;
+	private SingleStoreDataReader? m_activeReader;
+	private EnlistedTransactionBase? m_enlistedTransaction;
 }

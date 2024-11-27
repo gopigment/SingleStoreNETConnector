@@ -35,8 +35,15 @@ internal sealed class XaEnlistedTransaction : EnlistedTransactionBase
 
 	protected override void OnRollback(Enlistment enlistment)
 	{
-		ExecuteXaCommand("END");
-		ExecuteXaCommand("ROLLBACK");
+		try
+		{
+			ExecuteXaCommand("END");
+			ExecuteXaCommand("ROLLBACK");
+		}
+		catch (SingleStoreException ex) when (ex.ErrorCode is SingleStoreErrorCode.XARBDeadlock)
+		{
+			// ignore deadlock when rolling back
+		}
 	}
 
 	private void ExecuteXaCommand(string statement)
@@ -46,7 +53,7 @@ internal sealed class XaEnlistedTransaction : EnlistedTransactionBase
 		cmd.ExecuteNonQuery();
 	}
 
-	static int s_currentId;
+	private static int s_currentId;
 
-	string? m_xid;
+	private string? m_xid;
 }

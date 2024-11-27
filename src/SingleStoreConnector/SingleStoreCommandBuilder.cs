@@ -37,6 +37,7 @@ public sealed class SingleStoreCommandBuilder : DbCommandBuilder
 		{
 			var parameter = command.Parameters.Add("@" + cachedParameter.Name, cachedParameter.SingleStoreDbType);
 			parameter.Direction = cachedParameter.Direction;
+			parameter.Size = cachedParameter.Length;
 		}
 	}
 
@@ -87,8 +88,8 @@ public sealed class SingleStoreCommandBuilder : DbCommandBuilder
 
 	public override string UnquoteIdentifier(string quotedIdentifier)
 	{
-		if (quotedIdentifier.Length >= 2 && quotedIdentifier[0] == QuotePrefix[0] && quotedIdentifier[quotedIdentifier.Length - 1] == QuoteSuffix[0])
-			quotedIdentifier = quotedIdentifier.Substring(1, quotedIdentifier.Length - 2);
+		if (quotedIdentifier is [ '`', .., '`' ])
+			quotedIdentifier = quotedIdentifier[1..^1];
 		return quotedIdentifier.Replace("``", "`");
 	}
 

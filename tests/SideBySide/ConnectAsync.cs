@@ -405,7 +405,7 @@ public class ConnectAsync : IClassFixture<DatabaseFixture>
 	public async Task Sha256WithoutSecureConnection()
 	{
 		var csb = AppConfig.CreateSha256ConnectionStringBuilder();
-		csb.SslMode = SingleStoreSslMode.None;
+		csb.SslMode = SingleStoreSslMode.Disabled;
 		csb.AllowPublicKeyRetrieval = true;
 		using var connection = new SingleStoreConnection(csb.ConnectionString);
 		if (AppConfig.SupportedFeatures.HasFlag(ServerFeatures.RsaEncryption))
@@ -426,7 +426,7 @@ public class ConnectAsync : IClassFixture<DatabaseFixture>
 	public async Task CachingSha2WithoutSecureConnection()
 	{
 		var csb = AppConfig.CreateCachingSha2ConnectionStringBuilder();
-		csb.SslMode = SingleStoreSslMode.None;
+		csb.SslMode = SingleStoreSslMode.Disabled;
 		csb.AllowPublicKeyRetrieval = true;
 		using var connection = new SingleStoreConnection(csb.ConnectionString);
 		await connection.OpenAsync();
@@ -528,6 +528,17 @@ public class ConnectAsync : IClassFixture<DatabaseFixture>
 		using var connection = new SingleStoreConnection(csb.ConnectionString);
 		await connection.OpenAsync();
 		Assert.Equal(ConnectionState.Open, connection.State);
+	}
+
+	[Fact]
+	public async Task DisposeAsyncRaisesDisposed()
+	{
+		var disposedCount = 0;
+		var connection = new SingleStoreConnection(AppConfig.ConnectionString);
+		connection.Disposed += (sender, args) => disposedCount++;
+		await connection.OpenAsync().ConfigureAwait(false);
+		await connection.DisposeAsync().ConfigureAwait(false);
+		Assert.Equal(1, disposedCount);
 	}
 
 	readonly DatabaseFixture m_database;

@@ -64,7 +64,7 @@ internal sealed class ConnectionSettings
 		else
 		{
 			TlsVersions = default;
-			for (var i = 6; i < csb.TlsVersion.Length; i += 8)
+			for (var i = 6; i < csb.TlsVersion.Length; i += 9)
 			{
 				char minorVersion = csb.TlsVersion[i];
 				if (minorVersion == '0')
@@ -78,13 +78,13 @@ internal sealed class ConnectionSettings
 					TlsVersions |= SslProtocols.Tls13;
 #endif
 				else
-					throw new InvalidOperationException("Unexpected character '{0}' for TLS minor version.".FormatInvariant(minorVersion));
+					throw new InvalidOperationException($"Unexpected character '{minorVersion}' for TLS minor version.");
 			}
 			if (TlsVersions == default)
 				throw new NotSupportedException("All specified TLS versions are incompatible with this platform.");
 		}
 
-		if (csb.TlsCipherSuites != "")
+		if (csb.TlsCipherSuites.Length != 0)
 		{
 #if NETCOREAPP3_0_OR_GREATER
 			var tlsCipherSuites = new List<TlsCipherSuite>();
@@ -95,10 +95,10 @@ internal sealed class ConnectionSettings
 					tlsCipherSuites.Add(cipherSuite);
 				else if (int.TryParse(suiteName, out var value) && Enum.IsDefined(typeof(TlsCipherSuite), value))
 					tlsCipherSuites.Add((TlsCipherSuite) value);
-				else if (Enum.TryParse<TlsCipherSuite>("TLS_" + suiteName, ignoreCase: true, out cipherSuite))
+				else if (Enum.TryParse("TLS_" + suiteName, ignoreCase: true, out cipherSuite))
 					tlsCipherSuites.Add(cipherSuite);
 				else
-					throw new NotSupportedException("Unknown value '{0}' for TlsCipherSuites.".FormatInvariant(suiteName));
+					throw new NotSupportedException($"Unknown value '{suiteName}' for TlsCipherSuites.");
 			}
 			TlsCipherSuites = tlsCipherSuites;
 #else
@@ -119,6 +119,7 @@ internal sealed class ConnectionSettings
 			throw new SingleStoreException("MaximumPoolSize must be greater than or equal to MinimumPoolSize");
 		MinimumPoolSize = ToSigned(csb.MinimumPoolSize);
 		MaximumPoolSize = ToSigned(csb.MaximumPoolSize);
+		DnsCheckInterval = ToSigned(csb.DnsCheckInterval);
 
 		// Other Options
 		AllowLoadLocalInfile = csb.AllowLoadLocalInfile;
@@ -128,6 +129,7 @@ internal sealed class ConnectionSettings
 		ApplicationName = csb.ApplicationName;
 		AutoEnlist = csb.AutoEnlist;
 		CancellationTimeout = csb.CancellationTimeout;
+		ConnAttrsExtra = csb.ConnectionAttributes;
 		ConnectionTimeout = ToSigned(csb.ConnectionTimeout);
 		ConvertZeroDateTime = csb.ConvertZeroDateTime;
 		DateTimeKind = (DateTimeKind) csb.DateTimeKind;
@@ -214,6 +216,7 @@ internal sealed class ConnectionSettings
 	public int ConnectionIdleTimeout { get; }
 	public int MinimumPoolSize { get; }
 	public int MaximumPoolSize { get; }
+	public int DnsCheckInterval { get; }
 
 	// Other Options
 	public bool AllowLoadLocalInfile { get; }
@@ -245,10 +248,11 @@ internal sealed class ConnectionSettings
 	public bool UseCompression { get; }
 	public bool UseXaTransactions { get; }
 
+	public string ConnAttrsExtra { get; set; }
 	public byte[]? ConnectionAttributes { get; set; }
 
 	// Helper Functions
-	int? m_connectionTimeoutMilliseconds;
+	private int? m_connectionTimeoutMilliseconds;
 	public int ConnectionTimeoutMilliseconds
 	{
 		get
@@ -301,6 +305,7 @@ internal sealed class ConnectionSettings
 		ConnectionIdleTimeout = other.ConnectionIdleTimeout;
 		MinimumPoolSize = other.MinimumPoolSize;
 		MaximumPoolSize = other.MaximumPoolSize;
+		DnsCheckInterval = other.DnsCheckInterval;
 
 		AllowLoadLocalInfile = other.AllowLoadLocalInfile;
 		AllowPublicKeyRetrieval = other.AllowPublicKeyRetrieval;
@@ -308,6 +313,7 @@ internal sealed class ConnectionSettings
 		AllowZeroDateTime = other.AllowZeroDateTime;
 		ApplicationName = other.ApplicationName;
 		AutoEnlist = other.AutoEnlist;
+		ConnAttrsExtra = other.ConnAttrsExtra;
 		ConnectionTimeout = other.ConnectionTimeout;
 		ConvertZeroDateTime = other.ConvertZeroDateTime;
 		DateTimeKind = other.DateTimeKind;
@@ -331,6 +337,6 @@ internal sealed class ConnectionSettings
 		UseXaTransactions = other.UseXaTransactions;
 	}
 
-	static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(ConnectionSettings));
-	static readonly string[] s_localhostPipeServer = { "." };
+	private static readonly ISingleStoreConnectorLogger Log = SingleStoreConnectorLogManager.CreateLogger(nameof(ConnectionSettings));
+	private static readonly string[] s_localhostPipeServer = { "." };
 }
